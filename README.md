@@ -26,6 +26,20 @@ Claude-driven personal todo scheduler.
 - `scripts/db.py`, `scheduler.py`, `reminder.py` — Python helpers.
 - `logs/cc-connect.log` — cc-connect command history.
 
+## Migrations
+
+Schema changes land as numbered SQL files in `migrations/`:
+
+```bash
+python scripts/migrate.py init      # one-time: stamp schema_version=1
+python scripts/migrate.py upgrade   # apply any pending migrations/
+```
+
+Add a new migration by creating `migrations/NNN_description.sql` where `NNN`
+is the next three-digit version (e.g. `002_add_started_at.sql`). The runner
+applies each file in order; a failed file is rolled back and leaves
+`schema_version` at the prior value.
+
 ## Common commands
 
 ```bash
