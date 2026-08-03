@@ -34,3 +34,8 @@ th { background: #eceff1; white-space: nowrap; }
 .progress { display: inline-block; width: 120px; height: 18px; margin-right: 8px; overflow: hidden; vertical-align: middle; background: #e0e0e0; border-radius: 3px; }
 .progress > .fill { height: 100%; background: #4caf50; border-radius: 3px; }
 .empty-state { padding: 48px 24px; text-align: center; background: #fff; border-radius: 8px; }
+.page-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
+.page-header h1 { margin-bottom: 8px; }
+.page-header p { margin-top: 0; color: #546e7a; }
+.meta { color: #78909c; font-size: 0.9rem; }
+.summary-line { margin: 20px 0; padding: 16px; background: #fff; border-left: 4px solid #4caf50; border-radius: 4px; }

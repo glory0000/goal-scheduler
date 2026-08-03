@@ -90,3 +90,28 @@ def test_index_loads_stylesheet(client):
     assert response.status_code == 200
     assert ".progress" in response.text
     assert ".status-in_progress" in response.text
+
+
+def test_goal_detail_shows_summary_tasks_and_dependencies(client):
+    db.create_goal("detail", "详情目标", "目标说明")
+    db.create_task("detail-T001", "detail", 1, "基础任务", "", 1.0, [])
+    db.create_task("detail-T002", "detail", 2, "依赖任务", "", 1.5, ["detail-T001"])
+    db.update_task_status("detail-T001", "done")
+    db.mark_task_reminded("detail-T002")
+
+    response = client.get("/goal/detail")
+
+    assert response.status_code == 200
+    assert "详情目标" in response.text
+    assert "目标说明" in response.text
+    assert "2 个任务，1 个已完成，完成率 50%" in response.text
+    assert "总预估 2.5 小时" in response.text
+    assert "基础任务" in response.text
+    assert "依赖任务" in response.text
+    assert "detail-T001 ✓" in response.text
+
+
+def test_goal_detail_unknown_slug_returns_404(client):
+    response = client.get("/goal/missing")
+    assert response.status_code == 404
+    assert "目标不存在" in response.text

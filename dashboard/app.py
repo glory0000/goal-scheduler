@@ -45,6 +45,26 @@ def _goal_row(goal: dict) -> dict:
     }
 
 
+def _format_timestamp(value: str | None) -> str:
+    return value.replace("T", " ") if value else "—"
+
+
+def _task_row(task: dict) -> dict:
+    dependencies = []
+    for dependency_id in task["depends_on"]:
+        dependency = db.get_task(dependency_id)
+        dependencies.append({
+            "id": dependency_id,
+            "done": dependency is not None and dependency["status"] == "done",
+        })
+    return {
+        "task": task,
+        "dependencies": dependencies,
+        "last_reminded": _format_timestamp(task["last_reminded_at"]),
+        "completed": _format_timestamp(task["completed_at"]),
+    }
+
+
 def create_app() -> Flask:
     flask_app = Flask(__name__)
     flask_app.jinja_env.globals["status_label"] = STATUS_LABELS
@@ -53,6 +73,27 @@ def create_app() -> Flask:
     def index():
         rows = [_goal_row(goal) for goal in db.list_goals()]
         return render_template("index.html", rows=rows)
+
+    @flask_app.get("/goal/<slug>")
+    def goal_detail(slug: str):
+        goal = db.get_goal(slug)
+        if goal is None:
+            return render_template("goal_detail.html", goal=None), 404
+
+        tasks = db.list_tasks(goal_slug=slug)
+        completed = sum(task["status"] == "done" for task in tasks)
+        summary = {
+            "total": len(tasks),
+            "completed": completed,
+            "progress": _progress(len(tasks), completed),
+            "estimated_hours": sum(task["estimated_hours"] or 0 for task in tasks),
+        }
+        return render_template(
+            "goal_detail.html",
+            goal=goal,
+            summary=summary,
+            task_rows=[_task_row(task) for task in tasks],
+        )
 
     @flask_app.get("/health")
     def health() -> Response:
