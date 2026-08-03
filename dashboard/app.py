@@ -15,6 +15,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import db
+import format_utils
 import scheduler
 
 STATUS_LABELS = {
@@ -60,11 +61,19 @@ def _task_row(task: dict) -> dict:
             "id": dependency_id,
             "done": dependency is not None and dependency["status"] == "done",
         })
+    started_at = task.get("started_at")
+    completed_at = task.get("completed_at")
+    try:
+        elapsed = format_utils.format_elapsed(started_at, completed_at)
+    except ValueError:
+        elapsed = "—"
     return {
         "task": task,
         "dependencies": dependencies,
         "last_reminded": _format_timestamp(task["last_reminded_at"]),
-        "completed": _format_timestamp(task["completed_at"]),
+        "started": _format_timestamp(started_at),
+        "elapsed": elapsed,
+        "completed": _format_timestamp(completed_at),
     }
 
 
@@ -91,6 +100,7 @@ def _today_view(today_date: str) -> dict:
         task = db.get_task(assignment["task_id"]) if assignment else None
         goal = db.get_goal(assignment["goal_slug"]) if assignment else None
         dependencies = []
+        task_label = None
         if task:
             scheduled_ids.add(task["id"])
             for dependency_id in task["depends_on"]:
@@ -99,10 +109,17 @@ def _today_view(today_date: str) -> dict:
                     "id": dependency_id,
                     "done": dependency is not None and dependency["status"] == "done",
                 })
+            task_label = f"[{goal['name']}] {task['id']} - {task['title']}"
+            if task.get("status") == "in_progress":
+                try:
+                    task_label += f"（已用 {format_utils.format_elapsed(task.get('started_at'))}）"
+                except ValueError:
+                    pass  # leave suffix off
         slot_rows.append({
             "slot": slot,
             "task": task,
             "goal": goal,
+            "task_label": task_label,
             "dependencies": dependencies,
         })
 
