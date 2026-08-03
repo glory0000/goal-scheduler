@@ -52,3 +52,24 @@ Expected: 1 job at `5 0 * * *` (00:05 daily). If missing, recreate:
 ```bash
 cc-connect cron add --cron "5 0 * * *" --prompt "<see commit history>" --desc "Todo scheduler: daily reminder chain rebuild"
 ```
+
+## Shadow period (1-2 weeks)
+
+Before fully trusting the scheduler, run it in parallel with your manual planning:
+
+1. Each morning, dump state via `bash scripts/dump_state.sh`.
+2. Compare Claude's planned schedule with your manual plan.
+3. Note discrepancies (Claude missed X, over-allocated Y, etc.).
+4. Tweak `config/schedule.json` or scheduling rules in `scheduler.py` as needed.
+5. Once 7+ days match consistently, remove the example goal and go live.
+
+## When to engage Claude
+
+Tell Claude any of these via Feishu:
+
+- "新目标：<描述>" — start a new goal (Claude will brainstorm).
+- "Txxx 完成了" / "Txxx 进度 50%" — update task status.
+- "今日重点 = <slug>" — change focus.
+- "跳过 <时段>" / "暂停 <slug>" — skip or pause.
+- "<目标> 增加任务：<描述>" — add a task.
+- "删除 Txxx" / "改 Txxx 为先做 Tyyy" — modify tasks.
