@@ -13,7 +13,12 @@ fi
 DATE_STR=$(echo "$1" | awk '{print $1}')
 TIME_STR=$(echo "$1" | awk '{print $2}')
 
-FOCUS=$(python -c "import db; print(db.get_today_focus() or '')")
+FOCUS=$(python -c "
+import sys
+sys.path.insert(0, 'scripts')
+import db
+print(db.get_today_focus() or '')
+")
 echo "Today focus: $FOCUS"
 
 echo ""
