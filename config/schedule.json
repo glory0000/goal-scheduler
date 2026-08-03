@@ -1,0 +1,13 @@
+{
+  "weekday": [
+    {"start": "07:30", "end": "09:00", "label": "morning"},
+    {"start": "12:00", "end": "13:00", "label": "lunch"},
+    {"start": "18:00", "end": "19:00", "label": "evening"},
+    {"start": "21:00", "end": "23:00", "label": "night"}
+  ],
+  "weekend": [
+    {"start": "09:30", "end": "13:30", "label": "morning-block"},
+    {"start": "14:00", "end": "18:00", "label": "afternoon-block"},
+    {"start": "19:00", "end": "23:00", "label": "evening-block"}
+  ]
+}
