@@ -50,7 +50,7 @@ cc-connect cron list
 Expected: 1 job at `5 0 * * *` (00:05 daily). If missing, recreate:
 
 ```bash
-cc-connect cron add --cron "5 0 * * *" --prompt "<see commit history>" --desc "Todo scheduler: daily reminder chain rebuild"
+cc-connect cron add --cron "5 0 * * *" --prompt "Daily fallback for todos scheduler. Read data/todos.db and config/schedule.json. For each remaining free slot today, ensure a cc-connect timer exists pointing at a pending task. Cancel stale timers (pointing at done/skipped tasks or past slots). Commit any DB or file changes. If everything is in order, no commit needed." --desc "Todo scheduler: daily reminder chain rebuild"
 ```
 
 ## Shadow period (1-2 weeks)

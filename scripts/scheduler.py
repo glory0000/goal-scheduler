@@ -3,7 +3,8 @@
 
 import json
 import os
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
+import warnings
 
 import db
 
@@ -89,6 +90,7 @@ def compute_schedule(
 
         # Pick next task
         candidate = None
+        overflowed: list[dict] = []
 
         # 1. Focus goal first
         if today_focus:
@@ -103,6 +105,8 @@ def compute_schedule(
                     if (t["estimated_hours"] or 0) <= slot_hours:
                         candidate = t
                         break
+                    else:
+                        overflowed.append(t)
 
         # 2. Overflow to other goals (round-robin by oldest updated_at)
         if candidate is None:
@@ -120,8 +124,20 @@ def compute_schedule(
                     if (t["estimated_hours"] or 0) <= slot_hours:
                         candidate = t
                         break
+                    else:
+                        overflowed.append(t)
                 if candidate:
                     break
+
+        # Emit warnings per spec §6 rule 3
+        for t in overflowed:
+            msg = (
+                f"task {t['id']} ('{t['title']}') estimated_hours="
+                f"{t['estimated_hours']} exceeds slot duration {slot_hours}h "
+                f"on {slot_date} {slot_start}-{slot['end']}; "
+                f"consider splitting or overriding."
+            )
+            warnings.warn(msg, stacklevel=2)
 
         if candidate is None:
             # No more eligible tasks; stop planning.

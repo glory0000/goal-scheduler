@@ -2,7 +2,6 @@ import os
 import sys
 import tempfile
 import pytest
-from datetime import datetime
 
 TEST_DB_DIR = tempfile.mkdtemp()
 os.environ["TODO_DB_PATH"] = os.path.join(TEST_DB_DIR, "test.db")
@@ -117,3 +116,22 @@ def test_compute_schedule_no_tasks_returns_empty():
         today_focus="g-e", from_date="2026-08-03", from_time="07:30"
     )
     assert plan == []
+
+
+def test_compute_schedule_warns_on_slot_overflow():
+    import warnings as _warnings
+    db.create_goal("g-w", "GW", "")
+    # 2.0h task vs 1.0h lunch slot — guaranteed to overflow on all weekday slots
+    db.create_task("g-w-T001", "g-w", 1, "BigTask", "", 2.0, [])
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        plan = scheduler.compute_schedule(
+            today_focus="g-w", from_date="2026-08-03", from_time="07:30"
+        )
+    # No eligible task fits → plan empty
+    assert plan == []
+    # At least one warning mentioning the task id, title, and estimated hours
+    msgs = [str(w.message) for w in caught]
+    assert any("g-w-T001" in m for m in msgs)
+    assert any("BigTask" in m for m in msgs)
+    assert any("2" in m for m in msgs)
