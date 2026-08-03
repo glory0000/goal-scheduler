@@ -41,6 +41,7 @@ def run_migrate(
     """Invoke scripts/migrate.py with isolated env vars."""
     env = os.environ.copy()
     env.pop("TODO_DB_PATH", None)
+    env.pop("TODO_MIGRATIONS_DIR", None)
     env["TODO_DB_PATH"] = str(db_path)
     if migrations_dir is not None:
         env["TODO_MIGRATIONS_DIR"] = str(migrations_dir)
@@ -83,3 +84,43 @@ def test_init_stamps_baseline_on_existing_db(tmp_path):
     assert "schema_version" in tables
     assert _read_schema_version(db_path) == 1
     assert "version 1" in result.stdout
+
+
+def test_init_is_idempotent(tmp_path):
+    db_path = tmp_path / "twice.db"
+
+    first = run_migrate(["init"], db_path=db_path)
+    assert first.returncode == 0, first.stderr
+
+    second = run_migrate(["init"], db_path=db_path)
+
+    assert second.returncode == 0, second.stderr
+    assert _read_schema_version(db_path) == 1
+    assert "version 1" in second.stdout
+
+
+def test_upgrade_rejects_db_without_init(tmp_path):
+    db_path = tmp_path / "no_init.db"
+    db_path.write_bytes(b"")  # exists but empty / not a SQLite DB
+
+    result = run_migrate(["upgrade"], db_path=db_path)
+
+    assert result.returncode == 1, result.stderr
+    assert "init" in result.stderr.lower()
+
+
+def test_upgrade_is_noop_when_no_pending_migrations(tmp_path):
+    db_path = tmp_path / "v1.db"
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+
+    init_result = run_migrate(["init"], db_path=db_path)
+    assert init_result.returncode == 0
+
+    upgrade_result = run_migrate(
+        ["upgrade"], db_path=db_path, migrations_dir=migrations_dir
+    )
+
+    assert upgrade_result.returncode == 0, upgrade_result.stderr
+    assert _read_schema_version(db_path) == 1
+    assert "no migrations to apply" in upgrade_result.stdout.lower()

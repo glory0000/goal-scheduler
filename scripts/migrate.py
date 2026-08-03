@@ -86,11 +86,65 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_MIGRATION_FILENAME = re.compile(r"^(\d{3})_.+\.sql$")
+
+
+def cmd_upgrade() -> int:
+    db_path = _get_db_path()
+    migrations_dir = _get_migrations_dir()
+
+    if not db_path.exists():
+        print(f"DB not found at {db_path}", file=sys.stderr)
+        print("Run `migrate.py init` first", file=sys.stderr)
+        return 1
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _table_exists(conn, "schema_version"):
+            print("Run `migrate.py init` first", file=sys.stderr)
+            return 1
+
+        current = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+
+        if not migrations_dir.exists():
+            print(f"No migrations to apply; already at version {current}")
+            return 0
+
+        pending = []
+        for entry in sorted(migrations_dir.iterdir()):
+            if not entry.is_file():
+                continue
+            m = _MIGRATION_FILENAME.match(entry.name)
+            if m and int(m.group(1)) > current:
+                pending.append((int(m.group(1)), entry))
+
+        if not pending:
+            print(f"No migrations to apply; already at version {current}")
+            return 0
+
+        # Apply pending migrations (Task 3 fills this in)
+        for version, file_path in pending:
+            sql = file_path.read_text()
+            conn.executescript(sql)
+            conn.execute(
+                "UPDATE schema_version SET version = ?, applied_at = ?",
+                (version, _now_iso()),
+            )
+        conn.commit()
+        print(f"Migrations complete; now at version {pending[-1][0]}")
+        return 0
+    finally:
+        conn.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "init":
         return cmd_init()
+    if args.command == "upgrade":
+        return cmd_upgrade()
     parser.error(f"unknown command: {args.command}")
     return 2  # unreachable
 
