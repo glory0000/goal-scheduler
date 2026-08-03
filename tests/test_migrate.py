@@ -124,3 +124,58 @@ def test_upgrade_is_noop_when_no_pending_migrations(tmp_path):
     assert upgrade_result.returncode == 0, upgrade_result.stderr
     assert _read_schema_version(db_path) == 1
     assert "no migrations to apply" in upgrade_result.stdout.lower()
+
+
+def test_upgrade_applies_pending_in_lexicographic_order(tmp_path):
+    db_path = tmp_path / "ordering.db"
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    # Two migrations: 003 runs after 002.
+    (migrations_dir / "002_add_started_at.sql").write_text(
+        "CREATE TABLE started_at_marker (id INTEGER);"
+    )
+    (migrations_dir / "003_add_priority.sql").write_text(
+        "CREATE TABLE priority_marker (id INTEGER);"
+    )
+
+    init_result = run_migrate(["init"], db_path=db_path)
+    assert init_result.returncode == 0
+
+    upgrade_result = run_migrate(
+        ["upgrade"], db_path=db_path, migrations_dir=migrations_dir
+    )
+
+    assert upgrade_result.returncode == 0, upgrade_result.stderr
+    assert _read_schema_version(db_path) == 3
+    tables = _read_sqlite_table_names(db_path)
+    assert "started_at_marker" in tables
+    assert "priority_marker" in tables
+    # 003 must appear after 002 in the output
+    out = upgrade_result.stdout
+    assert out.index("002_add_started_at.sql") < out.index("003_add_priority.sql")
+
+
+def test_upgrade_skips_already_applied(tmp_path):
+    db_path = tmp_path / "skip.db"
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    (migrations_dir / "003_only.sql").write_text(
+        "CREATE TABLE only_003_marker (id INTEGER);"
+    )
+
+    # Pre-stamp version=2 directly so 003 is the only pending one.
+    run_migrate(["init"], db_path=db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("UPDATE schema_version SET version = 2")
+        conn.commit()
+
+    upgrade_result = run_migrate(
+        ["upgrade"], db_path=db_path, migrations_dir=migrations_dir
+    )
+
+    assert upgrade_result.returncode == 0, upgrade_result.stderr
+    assert _read_schema_version(db_path) == 3
+    assert "only_003_marker" in {r[0] for r in
+        sqlite3.connect(str(db_path)).execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}

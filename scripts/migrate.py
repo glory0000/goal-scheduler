@@ -131,6 +131,7 @@ def cmd_upgrade() -> int:
                 "UPDATE schema_version SET version = ?, applied_at = ?",
                 (version, _now_iso()),
             )
+            print(f"Applied {file_path.name}, now at version {version}")
         conn.commit()
         print(f"Migrations complete; now at version {pending[-1][0]}")
         return 0
