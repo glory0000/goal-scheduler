@@ -2,6 +2,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import db
+import scheduler
 
 from dashboard.app import create_app, validate_database
 
@@ -115,3 +117,41 @@ def test_goal_detail_unknown_slug_returns_404(client):
     response = client.get("/goal/missing")
     assert response.status_code == 404
     assert "目标不存在" in response.text
+
+
+def test_today_route_shows_date_focus_slots_and_assignment(client):
+    db.create_goal("focus", "今日重点", "")
+    db.create_task("focus-T001", "focus", 1, "今日任务", "", 0.5, [])
+    db.set_today_focus("focus")
+
+    response = client.get("/today")
+
+    slots = scheduler.get_slots_for_date(date.today().isoformat())
+    assert response.status_code == 200
+    assert date.today().isoformat() in response.text
+    assert "今日重点" in response.text
+    assert "今日任务" in response.text
+    assert f'{slots[0]["start"]}-{slots[0]["end"]}' in response.text
+
+
+def test_today_route_shows_empty_schedule(client):
+    response = client.get("/today")
+    assert response.status_code == 200
+    assert "未设置" in response.text
+    assert "今日无安排" in response.text
+    assert "全部任务已完成" in response.text
+
+
+def test_today_route_counts_unscheduled_pending_tasks(client):
+    db.create_goal("many", "多个任务", "")
+    slots = scheduler.get_slots_for_date(date.today().isoformat())
+    for number in range(len(slots) + 1):
+        db.create_task(
+            f"many-T{number + 1:03d}", "many", number + 1,
+            f"任务 {number + 1}", "", 0.5, [],
+        )
+
+    response = client.get("/today")
+
+    assert response.status_code == 200
+    assert "今日剩余 1 个任务未安排" in response.text

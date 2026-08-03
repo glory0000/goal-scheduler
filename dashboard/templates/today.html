@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}今日 - 任务看板{% endblock %}
+{% block content %}
+  <header class="page-header">
+    <div><h1>{{ view.date }} {{ view.weekday }}</h1></div>
+    <div>今日重点：{% if view.focus_goal %}[{{ view.focus_goal.slug }}] {{ view.focus_goal.name }}{% else %}未设置{% endif %}</div>
+  </header>
+
+  {% if not view.has_assignments %}<p class="notice">今日无安排</p>{% endif %}
+  <section class="timeline">
+    {% for row in view.slot_rows %}
+      <article class="timeline-row">
+        <time>{{ row.slot.start }}-{{ row.slot.end }}</time>
+        <div class="timeline-content">
+          {% if row.task %}
+            <strong>[{{ row.goal.name }}] {{ row.task.id }} - {{ row.task.title }}</strong>
+            <a href="{{ url_for('goal_detail', slug=row.goal.slug) }}">详情</a>
+            {% if row.dependencies %}
+              <div class="dependencies">依赖：{% for dep in row.dependencies %}{{ dep.id }} {{ "✓" if dep.done else "未完成" }}{% if not loop.last %}，{% endif %}{% endfor %}</div>
+            {% endif %}
+          {% else %}
+            <span class="empty-slot">──────────（无任务）</span>
+          {% endif %}
+        </div>
+      </article>
+    {% endfor %}
+  </section>
+
+  <footer class="schedule-footer">
+    {% if view.remaining %}今日剩余 {{ view.remaining }} 个任务未安排{% else %}全部任务已完成{% endif %}
+  </footer>
+{% endblock %}

@@ -39,3 +39,12 @@ th { background: #eceff1; white-space: nowrap; }
 .page-header p { margin-top: 0; color: #546e7a; }
 .meta { color: #78909c; font-size: 0.9rem; }
 .summary-line { margin: 20px 0; padding: 16px; background: #fff; border-left: 4px solid #4caf50; border-radius: 4px; }
+.notice { padding: 12px 16px; background: #fff3e0; border-radius: 6px; }
+.timeline { margin-top: 20px; background: #fff; border-radius: 8px; }
+.timeline-row { display: grid; grid-template-columns: 120px 1fr; gap: 20px; padding: 18px; border-bottom: 1px solid #eceff1; }
+.timeline-row:last-child { border-bottom: 0; }
+.timeline-row time { font-weight: 700; color: #455a64; }
+.timeline-content a { margin-left: 12px; }
+.empty-slot { color: #90a4ae; }
+.dependencies { margin-top: 8px; color: #607d8b; font-size: 0.9rem; }
+.schedule-footer { margin-top: 20px; padding: 16px; text-align: center; font-weight: 600; background: #e8f5e9; border-radius: 6px; }

@@ -3,6 +3,7 @@
 
 import os
 import sys
+from datetime import date
 from pathlib import Path
 
 from flask import Flask, Response, render_template
@@ -13,6 +14,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import db
+import scheduler
 
 STATUS_LABELS = {
     "active": "进行中",
@@ -65,6 +67,61 @@ def _task_row(task: dict) -> dict:
     }
 
 
+WEEKDAY_LABELS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def _today_view(today_date: str) -> dict:
+    slots = scheduler.get_slots_for_date(today_date)
+    focus_slug = db.get_today_focus()
+    focus_goal = db.get_goal(focus_slug) if focus_slug else None
+    plan = scheduler.compute_schedule(
+        focus_slug,
+        today_date,
+        "00:00",
+        max_slots=len(slots),
+    )
+    today_plan = [item for item in plan if item["date"] == today_date]
+    assignments = {item["slot_start"]: item for item in today_plan}
+
+    slot_rows = []
+    scheduled_ids = set()
+    for slot in slots:
+        assignment = assignments.get(slot["start"])
+        task = db.get_task(assignment["task_id"]) if assignment else None
+        goal = db.get_goal(assignment["goal_slug"]) if assignment else None
+        dependencies = []
+        if task:
+            scheduled_ids.add(task["id"])
+            for dependency_id in task["depends_on"]:
+                dependency = db.get_task(dependency_id)
+                dependencies.append({
+                    "id": dependency_id,
+                    "done": dependency is not None and dependency["status"] == "done",
+                })
+        slot_rows.append({
+            "slot": slot,
+            "task": task,
+            "goal": goal,
+            "dependencies": dependencies,
+        })
+
+    active_goals = db.list_goals(status="active")
+    pending_tasks = [
+        task
+        for goal in active_goals
+        for task in db.list_tasks(goal_slug=goal["slug"], status="pending")
+    ]
+    remaining = sum(task["id"] not in scheduled_ids for task in pending_tasks)
+    return {
+        "date": today_date,
+        "weekday": WEEKDAY_LABELS[date.fromisoformat(today_date).weekday()],
+        "focus_goal": focus_goal,
+        "slot_rows": slot_rows,
+        "has_assignments": bool(scheduled_ids),
+        "remaining": remaining,
+    }
+
+
 def create_app() -> Flask:
     flask_app = Flask(__name__)
     flask_app.jinja_env.globals["status_label"] = STATUS_LABELS
@@ -98,6 +155,10 @@ def create_app() -> Flask:
     @flask_app.get("/health")
     def health() -> Response:
         return Response("ok", mimetype="text/plain")
+
+    @flask_app.get("/today")
+    def today():
+        return render_template("today.html", view=_today_view(date.today().isoformat()))
 
     return flask_app
 
