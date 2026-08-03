@@ -180,6 +180,11 @@ def test_stats_route_shows_aggregates_progress_and_recent_completion(client):
     assert 'style="width: 50%"' in response.text
 
 
+def test_stats_route_handles_empty_database(client):
+    response = client.get("/stats")
+    assert response.status_code == 200
+    assert ">0</strong><span>活跃目标" in response.text
+    assert "最近 7 天暂无已完成任务" in response.text
 
 
 def test_database_error_returns_generic_500_page(client):
