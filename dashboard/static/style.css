@@ -52,3 +52,10 @@ th { background: #eceff1; white-space: nowrap; }
 .stat-card { display: flex; flex-direction: column; gap: 8px; padding: 20px; background: #fff; border-radius: 8px; }
 .stat-card strong { font-size: 1.8rem; color: #2e7d32; }
 .stat-card span { color: #607d8b; }
+h2 { margin-top: 32px; }
+@media (max-width: 800px) {
+  .top-nav { align-items: flex-start; gap: 12px; }
+  .container { padding: 16px; }
+  .stat-grid { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
+  .timeline-row { grid-template-columns: 1fr; gap: 8px; }
+}

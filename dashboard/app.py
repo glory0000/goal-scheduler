@@ -2,6 +2,7 @@
 """Read-only web dashboard for the todo scheduler."""
 
 import os
+import sqlite3
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -155,6 +156,14 @@ def _stats_view() -> dict:
 def create_app() -> Flask:
     flask_app = Flask(__name__)
     flask_app.jinja_env.globals["status_label"] = STATUS_LABELS
+
+    @flask_app.errorhandler(sqlite3.Error)
+    def handle_database_error(exc: sqlite3.Error):
+        flask_app.logger.exception(
+            "Dashboard database read failed",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        return render_template("error.html"), 500
 
     @flask_app.get("/")
     def index():

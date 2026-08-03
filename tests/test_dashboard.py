@@ -4,6 +4,7 @@ import sys
 import tempfile
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -179,8 +180,21 @@ def test_stats_route_shows_aggregates_progress_and_recent_completion(client):
     assert 'style="width: 50%"' in response.text
 
 
-def test_stats_route_handles_empty_database(client):
-    response = client.get("/stats")
-    assert response.status_code == 200
-    assert ">0</strong><span>活跃目标" in response.text
-    assert "最近 7 天暂无已完成任务" in response.text
+
+
+def test_database_error_returns_generic_500_page(client):
+    with patch.object(db, "list_goals", side_effect=sqlite3.DatabaseError("secret DB detail")):
+        response = client.get("/")
+
+    assert response.status_code == 500
+    assert "读取任务数据失败，请检查服务日志" in response.text
+    assert "secret DB detail" not in response.text
+
+
+def test_all_dashboard_routes_return_success(client):
+    db.create_goal("smoke", "冒烟目标", "")
+    db.create_task("smoke-T001", "smoke", 1, "冒烟任务", "", 0.5, [])
+
+    for path in ("/", "/goal/smoke", "/today", "/stats", "/health"):
+        response = client.get(path)
+        assert response.status_code == 200, path
