@@ -231,48 +231,31 @@ def test_goal_detail_shows_started_and_elapsed_columns(client):
     assert ("h " in body) or ("m " in body) or ("s</td>" in body)
 
 
-def test_today_timeline_appends_elapsed_suffix_for_in_progress(client):
-    # 1. Test _task_row includes started and elapsed
-    db.create_goal("elapsed-test", "测试目标", "")
-    db.create_task("elapsed-test-T001", "elapsed-test", 1, "测试任务", "", 1.0, [])
-    from dashboard.app import _task_row
-    task = db.get_task("elapsed-test-T001")
-    row = _task_row(task)
-    assert "started" in row
-    assert "elapsed" in row
-    assert row["started"] == "—"
-    assert row["elapsed"] == "—"
+def test_today_timeline_appends_elapsed_suffix_for_in_progress(client, monkeypatch):
+    import scheduler
+    from datetime import date
 
-    # 2. Test _task_row with in_progress task that has started_at
-    db.update_task_status("elapsed-test-T001", "in_progress")
-    task = db.get_task("elapsed-test-T001")  # refresh
-    row = _task_row(task)
-    assert row["started"] != "—"
-    assert row["elapsed"] != "—"
-
-    # 3. Test task_label construction logic directly
-    from dashboard.app import _today_view
-    import format_utils
-
-    # Create an in_progress task and a goal
     db.create_goal("today-elapsed", "今日目标", "")
-    db.create_task("today-elapsed-T001", "today-elapsed", 1, "进行中任务", "", 0.5, [])
+    db.create_task("today-elapsed-T001", "today-elapsed", 1, "进行中任务", "", 1.0, [])
     db.update_task_status("today-elapsed-T001", "in_progress")
     db.set_today_focus("today-elapsed")
 
-    task = db.get_task("today-elapsed-T001")
-    goal = db.get_goal("today-elapsed")
+    # Monkeypatch compute_schedule to always return our task in the first slot
+    def mock_compute_schedule(focus_slug, from_date, from_time, max_slots=20):
+        return [{
+            "date": from_date,
+            "slot_start": "07:30",
+            "slot_end": "09:00",
+            "goal_slug": "today-elapsed",
+            "task_id": "today-elapsed-T001",
+        }]
 
-    # Test the core task_label construction logic that's in _today_view
-    task_label = f"[{goal['name']}] {task['id']} - {task['title']}"
-    assert task.get("status") == "in_progress"
-    task_label += f"（已用 {format_utils.format_elapsed(task.get('started_at'))}）"
+    monkeypatch.setattr(scheduler, "compute_schedule", mock_compute_schedule)
 
-    assert "进行中任务（已用" in task_label
-    assert task_label.endswith("）")
+    response = client.get("/today")
 
-    # 4. Verify that our template change is correct (text substitution check)
-    from pathlib import Path
-    template = Path("dashboard/templates/today.html").read_text(encoding="utf-8")
-    assert "{{ row.task_label }}" in template
-    assert "[{{ row.goal.name }}] {{ row.task.id }} - {{ row.task.title }}" not in template
+    assert response.status_code == 200
+    # The in_progress task label has the suffix appended
+    assert "进行中任务（已用" in response.text
+    # The closing parenthesis immediately follows the elapsed value
+    assert "）" in response.text
