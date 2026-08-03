@@ -35,8 +35,8 @@ bash scripts/dump_state.sh
 # Simulate a reminder at a given time
 bash scripts/simulate_reminder.sh "2026-08-04 21:00"
 
-# Re-run fallback rebuild manually
-bash scripts/dump_state.sh
+# Simulate session crash to test fallback cron
+bash scripts/break_session.sh
 ```
 
 ## See also
