@@ -1,0 +1,36 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #263238;
+  background: #f4f6f8;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+a { color: #1565c0; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.top-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 24px;
+  background: #263238;
+  color: #fff;
+}
+.nav-links { display: flex; gap: 20px; }
+.top-nav a { color: #fff; font-weight: 600; }
+.hint { color: #cfd8dc; font-size: 0.9rem; }
+.container { max-width: 1180px; margin: 0 auto; padding: 24px; }
+.table-wrap { overflow-x: auto; background: #fff; border-radius: 8px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 12px 14px; border-bottom: 1px solid #eceff1; text-align: left; }
+th { background: #eceff1; white-space: nowrap; }
+.status { display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 0.85rem; white-space: nowrap; }
+.status-done, .status-active { background: #4caf50; color: #fff; }
+.status-in_progress { background: #ff9800; color: #fff; }
+.status-pending, .status-paused { background: #9e9e9e; color: #fff; }
+.status-skipped { background: #f44336; color: #fff; }
+.status-completed { background: #2196f3; color: #fff; }
+.progress-cell { min-width: 190px; }
+.progress { display: inline-block; width: 120px; height: 18px; margin-right: 8px; overflow: hidden; vertical-align: middle; background: #e0e0e0; border-radius: 3px; }
+.progress > .fill { height: 100%; background: #4caf50; border-radius: 3px; }
+.empty-state { padding: 48px 24px; text-align: center; background: #fff; border-radius: 8px; }

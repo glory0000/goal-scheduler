@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}目标 - 任务看板{% endblock %}
+{% block content %}
+  <h1>目标</h1>
+  {% if rows %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>名称</th><th>状态</th><th>总数</th><th>完成</th><th>进度</th><th>当前任务</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+            <tr>
+              <td><a href="/goal/{{ row.goal.slug }}">{{ row.goal.name }}</a></td>
+              <td><span class="status status-{{ row.goal.status }}">{{ status_label[row.goal.status] }}</span></td>
+              <td>{{ row.total }}</td>
+              <td>{{ row.completed }}</td>
+              <td class="progress-cell">
+                <div class="progress"><div class="fill" style="width: {{ row.progress }}%"></div></div>
+                <span>{{ row.progress }}%</span>
+              </td>
+              <td>{{ row.current.title if row.current else "—" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <section class="empty-state">
+      <h2>暂无目标</h2>
+      <p>通过飞书告诉 Claude 添加你的第一个目标</p>
+    </section>
+  {% endif %}
+{% endblock %}

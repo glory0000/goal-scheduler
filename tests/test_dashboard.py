@@ -59,3 +59,34 @@ def test_validate_database_rejects_missing_file(tmp_path):
 
 def test_validate_database_accepts_existing_file(test_db):
     validate_database(test_db)
+
+
+def test_index_route_shows_goal_progress_and_current_task(client):
+    db.create_goal("goal-a", "目标 A", "第一个目标")
+    db.create_task("goal-a-T001", "goal-a", 1, "已完成任务", "", 1.0, [])
+    db.create_task("goal-a-T002", "goal-a", 2, "当前任务", "", 2.0, [])
+    db.update_task_status("goal-a-T001", "done")
+    db.update_task_status("goal-a-T002", "in_progress")
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "目标 A" in response.text
+    assert "当前任务" in response.text
+    assert "50%" in response.text
+    assert 'class="status status-active"' in response.text
+    assert 'style="width: 50%"' in response.text
+
+
+def test_index_route_shows_empty_state(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "暂无目标" in response.text
+    assert "通过飞书告诉 Claude 添加你的第一个目标" in response.text
+
+
+def test_index_loads_stylesheet(client):
+    response = client.get("/static/style.css")
+    assert response.status_code == 200
+    assert ".progress" in response.text
+    assert ".status-in_progress" in response.text
