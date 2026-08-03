@@ -57,6 +57,9 @@ def cmd_init() -> int:
 
         if not _table_exists(conn, "goals"):
             schema_path = Path(__file__).resolve().parent.parent / "data" / "schema.sql"
+            if not schema_path.exists():
+                print(f"Error: schema file not found at {schema_path}", file=sys.stderr)
+                return 1
             conn.executescript(schema_path.read_text())
 
         conn.executescript(
