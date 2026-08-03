@@ -3,7 +3,7 @@
 
 import os
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, Response, render_template
@@ -122,6 +122,36 @@ def _today_view(today_date: str) -> dict:
     }
 
 
+def _stats_view() -> dict:
+    goals = db.list_goals()
+    tasks = db.list_tasks()
+    completed_tasks = [task for task in tasks if task["status"] == "done"]
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+
+    recent = []
+    for task in completed_tasks:
+        if not task["completed_at"]:
+            continue
+        completed_at = datetime.strptime(task["completed_at"], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        if completed_at >= cutoff:
+            recent.append({
+                "task": task,
+                "goal": db.get_goal(task["goal_slug"]),
+                "completed": _format_timestamp(task["completed_at"]),
+            })
+    recent.sort(key=lambda row: row["task"]["completed_at"], reverse=True)
+
+    return {
+        "active_goals": sum(goal["status"] == "active" for goal in goals),
+        "total_tasks": len(tasks),
+        "completed_tasks": len(completed_tasks),
+        "estimated_hours": sum(task["estimated_hours"] or 0 for task in tasks),
+        "completed_estimated_hours": sum(task["estimated_hours"] or 0 for task in completed_tasks),
+        "goal_rows": [_goal_row(goal) for goal in goals if goal["status"] == "active"],
+        "recent": recent,
+    }
+
+
 def create_app() -> Flask:
     flask_app = Flask(__name__)
     flask_app.jinja_env.globals["status_label"] = STATUS_LABELS
@@ -159,6 +189,10 @@ def create_app() -> Flask:
     @flask_app.get("/today")
     def today():
         return render_template("today.html", view=_today_view(date.today().isoformat()))
+
+    @flask_app.get("/stats")
+    def stats():
+        return render_template("stats.html", view=_stats_view())
 
     return flask_app
 

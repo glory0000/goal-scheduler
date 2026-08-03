@@ -155,3 +155,32 @@ def test_today_route_counts_unscheduled_pending_tasks(client):
 
     assert response.status_code == 200
     assert "今日剩余 1 个任务未安排" in response.text
+
+
+def test_stats_route_shows_aggregates_progress_and_recent_completion(client):
+    db.create_goal("active", "活跃目标", "")
+    db.create_goal("paused", "暂停目标", "")
+    db.update_goal_status("paused", "paused")
+    db.create_task("active-T001", "active", 1, "最近完成", "", 1.5, [])
+    db.create_task("active-T002", "active", 2, "待办任务", "", 2.0, [])
+    db.create_task("paused-T001", "paused", 1, "暂停任务", "", 3.0, [])
+    db.update_task_status("active-T001", "done")
+
+    response = client.get("/stats")
+
+    assert response.status_code == 200
+    assert "活跃目标" in response.text
+    assert ">1</strong><span>活跃目标" in response.text
+    assert ">3</strong><span>总任务" in response.text
+    assert ">1</strong><span>已完成" in response.text
+    assert ">6.5 h</strong><span>总预估耗时" in response.text
+    assert ">1.5 h</strong><span>已完成预估耗时" in response.text
+    assert "最近完成" in response.text
+    assert 'style="width: 50%"' in response.text
+
+
+def test_stats_route_handles_empty_database(client):
+    response = client.get("/stats")
+    assert response.status_code == 200
+    assert ">0</strong><span>活跃目标" in response.text
+    assert "最近 7 天暂无已完成任务" in response.text

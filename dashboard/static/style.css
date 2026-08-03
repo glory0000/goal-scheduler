@@ -48,3 +48,7 @@ th { background: #eceff1; white-space: nowrap; }
 .empty-slot { color: #90a4ae; }
 .dependencies { margin-top: 8px; color: #607d8b; font-size: 0.9rem; }
 .schedule-footer { margin-top: 20px; padding: 16px; text-align: center; font-weight: 600; background: #e8f5e9; border-radius: 6px; }
+.stat-grid { display: grid; grid-template-columns: repeat(5, minmax(140px, 1fr)); gap: 16px; margin-bottom: 32px; }
+.stat-card { display: flex; flex-direction: column; gap: 8px; padding: 20px; background: #fff; border-radius: 8px; }
+.stat-card strong { font-size: 1.8rem; color: #2e7d32; }
+.stat-card span { color: #607d8b; }

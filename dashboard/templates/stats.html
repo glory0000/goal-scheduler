@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}统计 - 任务看板{% endblock %}
+{% block content %}
+  <h1>全局统计</h1>
+  <section class="stat-grid">
+    <article class="stat-card"><strong>{{ view.active_goals }}</strong><span>活跃目标</span></article>
+    <article class="stat-card"><strong>{{ view.total_tasks }}</strong><span>总任务</span></article>
+    <article class="stat-card"><strong>{{ view.completed_tasks }}</strong><span>已完成</span></article>
+    <article class="stat-card"><strong>{{ "%.1f"|format(view.estimated_hours) }} h</strong><span>总预估耗时</span></article>
+    <article class="stat-card"><strong>{{ "%.1f"|format(view.completed_estimated_hours) }} h</strong><span>已完成预估耗时</span></article>
+  </section>
+
+  <h2>活跃目标进度</h2>
+  {% if view.goal_rows %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>目标</th><th>完成</th><th>进度</th></tr></thead>
+        <tbody>
+          {% for row in view.goal_rows %}
+            <tr>
+              <td><a href="{{ url_for('goal_detail', slug=row.goal.slug) }}">{{ row.goal.name }}</a></td>
+              <td>{{ row.completed }}/{{ row.total }}</td>
+              <td class="progress-cell"><div class="progress"><div class="fill" style="width: {{ row.progress }}%"></div></div><span>{{ row.progress }}%</span></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="notice">暂无活跃目标</p>
+  {% endif %}
+
+  <h2>最近完成</h2>
+  {% if view.recent %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>任务</th><th>目标</th><th>完成时间</th></tr></thead>
+        <tbody>
+          {% for row in view.recent %}
+            <tr><td>{{ row.task.title }}</td><td>{{ row.goal.name }}</td><td>{{ row.completed }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="notice">最近 7 天暂无已完成任务</p>
+  {% endif %}
+{% endblock %}
