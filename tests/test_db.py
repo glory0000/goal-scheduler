@@ -23,6 +23,9 @@ from db import (
     update_goal_status, update_goal_counts, now_iso,
     create_task, get_task, list_tasks, list_eligible_tasks,
     update_task_status, mark_task_reminded, count_tasks_by_status,
+    get_setting, set_setting,
+    get_today_focus, set_today_focus,
+    recompute_goal_counts, write_goal_md_progress,
 )
 
 
@@ -150,3 +153,46 @@ def test_count_tasks_by_status():
     counts = count_tasks_by_status("g-cnt")
     assert counts["pending"] == 2
     assert counts["done"] == 1
+
+
+def test_settings_roundtrip():
+    set_setting("foo", "bar")
+    assert get_setting("foo") == "bar"
+
+
+def test_today_focus():
+    create_goal("focus-1", "F1", "")
+    set_today_focus("focus-1")
+    assert get_today_focus() == "focus-1"
+    set_today_focus(None)
+    assert get_today_focus() is None
+
+
+def test_recompute_goal_counts():
+    create_goal("rc", "RC", "")
+    create_task("rc-T001", "rc", 1, "A", "", 1.0, [])
+    create_task("rc-T002", "rc", 2, "B", "", 1.0, [])
+    update_task_status("rc-T001", "done")
+    recompute_goal_counts("rc")
+    g = get_goal("rc")
+    assert g["total_tasks"] == 2
+    assert g["completed_tasks"] == 1
+
+
+def test_write_goal_md_progress(tmp_path, monkeypatch):
+    # Redirect cwd
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "goals" / "rc2").mkdir(parents=True)
+    md = tmp_path / "goals" / "rc2" / "goal.md"
+    md.write_text(
+        "# 目标：RC2\n\n## 任务进度\n- 总任务数：0\n- 已完成：0\n\n## 备注\n", encoding="utf-8"
+    )
+    create_goal("rc2", "RC2", "")
+    create_task("rc2-T001", "rc2", 1, "A", "", 1.0, [])
+    create_task("rc2-T002", "rc2", 2, "B", "", 1.0, [])
+    update_task_status("rc2-T002", "done")
+    write_goal_md_progress("rc2")
+    text = md.read_text(encoding="utf-8")
+    assert "总任务数：2" in text
+    assert "已完成：1" in text
+    assert "完成率：50%" in text

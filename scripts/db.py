@@ -192,6 +192,93 @@ def count_tasks_by_status(goal_slug: str) -> dict[str, int]:
         return out
 
 
+# ============ settings table ============
+
+def get_setting(key: str) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+
+def set_setting(key: str, value: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO settings (key, value) VALUES (?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+            (key, value),
+        )
+
+
+def get_today_focus() -> str | None:
+    return get_setting("today_focus")
+
+
+def set_today_focus(slug: str | None) -> None:
+    if slug is None:
+        with get_conn() as conn:
+            conn.execute("DELETE FROM settings WHERE key = 'today_focus'")
+    else:
+        set_setting("today_focus", slug)
+
+
+# ============ derived stats / progress sync ============
+
+def recompute_goal_counts(slug: str) -> None:
+    """Recount a goal's tasks and persist to goals table."""
+    counts = count_tasks_by_status(slug)
+    total = sum(counts.values())
+    completed = counts["done"]
+    update_goal_counts(slug, total=total, completed=completed)
+
+
+def write_goal_md_progress(slug: str) -> None:
+    """Rewrite the `## 任务进度` block in goals/<slug>/goal.md."""
+    counts = count_tasks_by_status(slug)
+    total = sum(counts.values())
+    completed = counts["done"]
+    in_progress = counts["in_progress"]
+    pending = counts["pending"]
+    pct = int(round(completed * 100 / total)) if total > 0 else 0
+
+    md_path = os.path.join("goals", slug, "goal.md")
+    if not os.path.exists(md_path):
+        return
+
+    with open(md_path, encoding="utf-8") as f:
+        text = f.read()
+
+    new_block = (
+        "## 任务进度\n"
+        f"- 总任务数：{total}\n"
+        f"- 已完成：{completed}\n"
+        f"- 进行中：{in_progress}\n"
+        f"- 待办：{pending}\n"
+        f"- 完成率：{pct}%\n"
+    )
+
+    import re
+    if re.search(r"## 任务进度\n", text):
+        text = re.sub(
+            r"## 任务进度\n.*?(?=\n## |\Z)",
+            new_block + "\n",
+            text,
+            count=1,
+            flags=re.DOTALL,
+        )
+    else:
+        # Insert before first `## ` heading or at end
+        m = re.search(r"^## ", text, flags=re.MULTILINE)
+        if m:
+            text = text[: m.start()] + new_block + "\n" + text[m.start():]
+        else:
+            text = text.rstrip() + "\n\n" + new_block
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) >= 2 and sys.argv[1] == "init":
