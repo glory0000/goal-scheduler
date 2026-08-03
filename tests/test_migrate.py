@@ -239,3 +239,50 @@ def test_upgrade_does_not_touch_data_tables(tmp_path):
     assert goal[0] == "goal one"
     assert task[0] == "t"
     assert started_at[0] is None  # new column present, but data untouched
+
+
+def test_upgrade_applies_002_add_started_at(tmp_path):
+    """Apply 002 on a v1 DB → schema_version=2, tasks.started_at column exists."""
+    db_path = tmp_path / "v1_for_002.db"
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    (migrations_dir / "002_add_started_at.sql").write_text(
+        "ALTER TABLE tasks ADD COLUMN started_at TEXT"
+    )
+
+    init_result = run_migrate(["init"], db_path=db_path)
+    assert init_result.returncode == 0
+
+    upgrade_result = run_migrate(
+        ["upgrade"], db_path=db_path, migrations_dir=migrations_dir
+    )
+
+    assert upgrade_result.returncode == 0, upgrade_result.stderr
+    assert _read_schema_version(db_path) == 2
+    with sqlite3.connect(str(db_path)) as conn:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+    assert "started_at" in cols
+
+
+def test_upgrade_is_noop_when_002_already_applied(tmp_path):
+    """Re-run upgrade after 002 is applied → no-op, version stays at 2."""
+    db_path = tmp_path / "v2_reapply.db"
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    (migrations_dir / "002_add_started_at.sql").write_text(
+        "ALTER TABLE tasks ADD COLUMN started_at TEXT"
+    )
+
+    run_migrate(["init"], db_path=db_path)
+    first = run_migrate(
+        ["upgrade"], db_path=db_path, migrations_dir=migrations_dir
+    )
+    assert first.returncode == 0
+    assert _read_schema_version(db_path) == 2
+
+    second = run_migrate(
+        ["upgrade"], db_path=db_path, migrations_dir=migrations_dir
+    )
+
+    assert second.returncode == 0, second.stderr
+    assert _read_schema_version(db_path) == 2

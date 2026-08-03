@@ -13,7 +13,7 @@
         <time>{{ row.slot.start }}-{{ row.slot.end }}</time>
         <div class="timeline-content">
           {% if row.task %}
-            <strong>[{{ row.goal.name }}] {{ row.task.id }} - {{ row.task.title }}</strong>
+            <strong>{{ row.task_label }}</strong>
             <a href="{{ url_for('goal_detail', slug=row.goal.slug) }}">详情</a>
             {% if row.dependencies %}
               <div class="dependencies">依赖：{% for dep in row.dependencies %}{{ dep.id }} {{ "✓" if dep.done else "未完成" }}{% if not loop.last %}，{% endif %}{% endfor %}</div>

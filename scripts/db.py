@@ -156,17 +156,36 @@ def list_eligible_tasks(goal_slug: str | None = None) -> list[dict]:
 
 
 def update_task_status(id: str, status: str) -> None:
-    """Update task status. If 'done', also stamp completed_at."""
+    """Update task status.
+
+    First transition into in_progress stamps started_at via COALESCE.
+    The done transition stamps completed_at but does not touch started_at.
+    The pending/skipped transitions do not touch started_at or completed_at.
+    """
     if status not in ("pending", "in_progress", "done", "skipped"):
         raise ValueError(f"Invalid status: {status}")
     ts = now_iso()
-    completed_at = ts if status == "done" else None
     with get_conn() as conn:
-        conn.execute(
-            """UPDATE tasks SET status = ?, completed_at = ?, updated_at = ?
-               WHERE id = ?""",
-            (status, completed_at, ts, id),
-        )
+        if status == "in_progress":
+            conn.execute(
+                """UPDATE tasks SET status = ?,
+                                      started_at = COALESCE(started_at, ?),
+                                      updated_at = ?
+                   WHERE id = ?""",
+                (status, ts, ts, id),
+            )
+        elif status == "done":
+            conn.execute(
+                """UPDATE tasks SET status = ?, completed_at = ?, updated_at = ?
+                   WHERE id = ?""",
+                (status, ts, ts, id),
+            )
+        else:  # pending or skipped
+            conn.execute(
+                """UPDATE tasks SET status = ?, updated_at = ?
+                   WHERE id = ?""",
+                (status, ts, id),
+            )
 
 
 def mark_task_reminded(id: str) -> None:

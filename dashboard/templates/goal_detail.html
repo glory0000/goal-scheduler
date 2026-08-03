@@ -18,7 +18,7 @@
     {% if task_rows %}
       <div class="table-wrap">
         <table>
-          <thead><tr><th>ID</th><th>标题</th><th>小时</th><th>依赖</th><th>状态</th><th>上次提醒</th><th>完成时间</th></tr></thead>
+          <thead><tr><th>ID</th><th>标题</th><th>小时</th><th>依赖</th><th>状态</th><th>上次提醒</th><th>Started</th><th>Elapsed</th><th>完成时间</th></tr></thead>
           <tbody>
             {% for row in task_rows %}
               <tr>
@@ -32,6 +32,8 @@
                 </td>
                 <td><span class="status status-{{ row.task.status }}">{{ status_label[row.task.status] }}</span></td>
                 <td>{{ row.last_reminded }}</td>
+                <td>{{ row.started }}</td>
+                <td>{{ row.elapsed }}</td>
                 <td>{{ row.completed }}</td>
               </tr>
             {% endfor %}

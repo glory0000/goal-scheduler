@@ -19,6 +19,7 @@ COLLECTION_DB_PATH = Path(COLLECTION_DB_DIR) / "collection.db"
 os.environ["TODO_DB_PATH"] = str(COLLECTION_DB_PATH)
 with sqlite3.connect(COLLECTION_DB_PATH) as conn:
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    conn.execute("ALTER TABLE tasks ADD COLUMN started_at TEXT")
 
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -34,6 +35,7 @@ def test_db(tmp_path, monkeypatch):
     db_path = tmp_path / "todos.db"
     with sqlite3.connect(db_path) as conn:
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        conn.execute("ALTER TABLE tasks ADD COLUMN started_at TEXT")
     monkeypatch.setattr(db, "DB_PATH", str(db_path))
     return db_path
 
@@ -203,3 +205,57 @@ def test_all_dashboard_routes_return_success(client):
     for path in ("/", "/goal/smoke", "/today", "/stats", "/health"):
         response = client.get(path)
         assert response.status_code == 200, path
+
+
+def test_goal_detail_shows_started_and_elapsed_columns(client):
+    db.create_goal("elapsed-goal", "目标", "")
+    db.create_task("elapsed-goal-T001", "elapsed-goal", 1, "未开始", "", 1.0, [])
+    db.create_task("elapsed-goal-T002", "elapsed-goal", 2, "进行中", "", 1.5, [])
+    db.create_task("elapsed-goal-T003", "elapsed-goal", 3, "已完成", "", 1.0, [])
+    db.update_task_status("elapsed-goal-T002", "in_progress")
+    db.update_task_status("elapsed-goal-T003", "done")
+
+    response = client.get("/goal/elapsed-goal")
+
+    assert response.status_code == 200
+    # Column headers are rendered
+    assert "Started" in response.text
+    assert "Elapsed" in response.text
+    # The pending task has both columns as "—"
+    assert "未开始" in response.text
+    # The in_progress and done tasks should have a non-dash elapsed
+    # (a number with unit suffix). We assert the presence of the
+    # "h " or "m " or "s" pattern in elapsed cells.
+    body = response.text
+    # At least one row should have a non-dash elapsed
+    assert ("h " in body) or ("m " in body) or ("s</td>" in body)
+
+
+def test_today_timeline_appends_elapsed_suffix_for_in_progress(client, monkeypatch):
+    import scheduler
+    from datetime import date
+
+    db.create_goal("today-elapsed", "今日目标", "")
+    db.create_task("today-elapsed-T001", "today-elapsed", 1, "进行中任务", "", 1.0, [])
+    db.update_task_status("today-elapsed-T001", "in_progress")
+    db.set_today_focus("today-elapsed")
+
+    # Monkeypatch compute_schedule to always return our task in the first slot
+    def mock_compute_schedule(focus_slug, from_date, from_time, max_slots=20):
+        return [{
+            "date": from_date,
+            "slot_start": "07:30",
+            "slot_end": "09:00",
+            "goal_slug": "today-elapsed",
+            "task_id": "today-elapsed-T001",
+        }]
+
+    monkeypatch.setattr(scheduler, "compute_schedule", mock_compute_schedule)
+
+    response = client.get("/today")
+
+    assert response.status_code == 200
+    # The in_progress task label has the suffix appended
+    assert "进行中任务（已用" in response.text
+    # The closing parenthesis immediately follows the elapsed value
+    assert "）" in response.text
