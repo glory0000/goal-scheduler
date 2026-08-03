@@ -123,7 +123,8 @@ def cmd_upgrade() -> int:
             print(f"No migrations to apply; already at version {current}")
             return 0
 
-        # Apply pending migrations (Task 3 fills this in)
+        # Apply pending migrations in order. Task 4 will wrap this in
+        # try/except with rollback on per-file failure.
         for version, file_path in pending:
             sql = file_path.read_text()
             conn.executescript(sql)
