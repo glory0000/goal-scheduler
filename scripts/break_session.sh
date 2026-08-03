@@ -8,7 +8,9 @@ cc-connect timer list
 
 echo ""
 echo "Deleting all pending timers..."
-IDS=$(cc-connect timer list 2>/dev/null | grep -oE 'timer_[a-zA-Z0-9]+' || true)
+# cc-connect returns short IDs (e.g., 4603c91a) prefixed with emoji + spaces.
+# Match hex IDs after the clock emoji.
+IDS=$(cc-connect timer list 2>/dev/null | grep -oE '[a-f0-9]{6,}' || true)
 for id in $IDS; do
   echo "Deleting $id..."
   cc-connect timer del "$id" || true
