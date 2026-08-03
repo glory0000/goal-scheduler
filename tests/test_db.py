@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 with sqlite3.connect(TEST_DB_PATH) as conn:
     with open(os.path.join(os.path.dirname(__file__), "..", "data", "schema.sql")) as f:
         conn.executescript(f.read())
+    conn.execute("ALTER TABLE tasks ADD COLUMN started_at TEXT")
 
 import db
 
@@ -196,3 +197,47 @@ def test_write_goal_md_progress(tmp_path, monkeypatch):
     assert "总任务数：2" in text
     assert "已完成：1" in text
     assert "完成率：50%" in text
+
+
+def test_update_task_status_stamps_started_at_on_first_in_progress():
+    create_goal("g-s1", "GS1", "")
+    create_task("g-s1-T001", "g-s1", 1, "X", "", 1.0, [])
+    update_task_status("g-s1-T001", "in_progress")
+    t = get_task("g-s1-T001")
+    assert t["started_at"] is not None
+    # Stamped on the same call as updated_at
+    assert t["started_at"] == t["updated_at"]
+
+
+def test_update_task_status_done_preserves_started_at():
+    create_goal("g-s2", "GS2", "")
+    create_task("g-s2-T001", "g-s2", 1, "X", "", 1.0, [])
+    update_task_status("g-s2-T001", "in_progress")
+    started = get_task("g-s2-T001")["started_at"]
+    update_task_status("g-s2-T001", "done")
+    t = get_task("g-s2-T001")
+    assert t["started_at"] == started  # preserved through done
+    assert t["completed_at"] is not None
+
+
+def test_update_task_status_in_progress_idempotent_via_coalesce():
+    create_goal("g-s3", "GS3", "")
+    create_task("g-s3-T001", "g-s3", 1, "X", "", 1.0, [])
+    update_task_status("g-s3-T001", "in_progress")
+    started = get_task("g-s3-T001")["started_at"]
+    update_task_status("g-s3-T001", "pending")
+    update_task_status("g-s3-T001", "in_progress")
+    t = get_task("g-s3-T001")
+    assert t["started_at"] == started  # unchanged (COALESCE)
+
+
+def test_update_task_status_done_to_in_progress_preserves_started_at():
+    create_goal("g-s4", "GS4", "")
+    create_task("g-s4-T001", "g-s4", 1, "X", "", 1.0, [])
+    update_task_status("g-s4-T001", "in_progress")
+    update_task_status("g-s4-T001", "done")
+    started = get_task("g-s4-T001")["started_at"]
+    update_task_status("g-s4-T001", "in_progress")
+    t = get_task("g-s4-T001")
+    assert t["started_at"] == started
+    assert t["status"] == "in_progress"
