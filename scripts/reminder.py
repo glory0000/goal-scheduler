@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Format Feishu reminder messages."""
 
+from format_utils import format_elapsed
+
 
 def format_reminder(
     date_str: str,
@@ -24,11 +26,19 @@ def format_reminder(
         deps_block = "📎 依赖：无"
 
     task_short_id = task["id"].split("-")[-1]  # strip slug prefix
+
+    elapsed_suffix = ""
+    if task.get("status") == "in_progress":
+        try:
+            elapsed_suffix = f"（已用 {format_elapsed(task.get('started_at'))}）"
+        except ValueError:
+            elapsed_suffix = ""
+
     return (
         f"⏰ {slot_start} 时段开始（{slot_start}-{slot_end}）\n"
         f"\n"
         f"📌 目标：{goal['name']}\n"
-        f"🎯 任务：{task_short_id} - {task['title']}\n"
+        f"🎯 任务：{task_short_id} - {task['title']}{elapsed_suffix}\n"
         f"⏱️ 预计耗时：{hours_str}\n"
         f"{deps_block}\n"
         f"\n"
