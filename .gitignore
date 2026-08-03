@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# SQLite
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/*.db.bak
+
+# Backups (kept under version control per spec)
+# Actually, do NOT gitignore backups/ since we want them tracked
+
+# Logs
+logs/*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
