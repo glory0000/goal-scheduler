@@ -123,16 +123,23 @@ def cmd_upgrade() -> int:
             print(f"No migrations to apply; already at version {current}")
             return 0
 
-        # Apply pending migrations in order. Task 4 will wrap this in
-        # try/except with rollback on per-file failure.
+        # Apply pending migrations one at a time; rollback on failure.
         for version, file_path in pending:
             sql = file_path.read_text()
-            conn.executescript(sql)
-            conn.execute(
-                "UPDATE schema_version SET version = ?, applied_at = ?",
-                (version, _now_iso()),
-            )
-            print(f"Applied {file_path.name}, now at version {version}")
+            try:
+                conn.executescript(sql)
+                conn.execute(
+                    "UPDATE schema_version SET version = ?, applied_at = ?",
+                    (version, _now_iso()),
+                )
+                print(f"Applied {file_path.name}, now at version {version}")
+            except sqlite3.Error as exc:
+                conn.rollback()
+                print(
+                    f"Migration {file_path.name} failed: {exc}",
+                    file=sys.stderr,
+                )
+                raise
         conn.commit()
         print(f"Migrations complete; now at version {pending[-1][0]}")
         return 0

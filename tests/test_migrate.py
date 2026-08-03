@@ -179,3 +179,63 @@ def test_upgrade_skips_already_applied(tmp_path):
         sqlite3.connect(str(db_path)).execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()}
+
+
+def test_upgrade_rolls_back_on_failure(tmp_path):
+    db_path = tmp_path / "rollback.db"
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    (migrations_dir / "002_bad.sql").write_text("THIS IS NOT VALID SQL")
+
+    run_migrate(["init"], db_path=db_path)
+
+    upgrade_result = run_migrate(
+        ["upgrade"], db_path=db_path, migrations_dir=migrations_dir
+    )
+
+    assert upgrade_result.returncode != 0, upgrade_result.stdout
+    assert _read_schema_version(db_path) == 1
+    # No table named after the bad migration was created
+    tables = _read_sqlite_table_names(db_path)
+    assert "schema_version" in tables  # baseline preserved
+
+
+def test_upgrade_does_not_touch_data_tables(tmp_path):
+    db_path = tmp_path / "data_keep.db"
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    (migrations_dir / "002_add_column.sql").write_text(
+        "ALTER TABLE tasks ADD COLUMN started_at TEXT"
+    )
+
+    # Init + seed data
+    run_migrate(["init"], db_path=db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO goals (slug, name, description, status, "
+            "total_tasks, completed_tasks, created_at, updated_at) "
+            "VALUES ('g1', 'goal one', '', 'active', 1, 0, '2026-08-03T00:00:00', '2026-08-03T00:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO tasks (id, goal_slug, sequence, title, description, "
+            "estimated_hours, depends_on, status, last_reminded_at, completed_at, "
+            "created_at, updated_at) VALUES ('g1-T001', 'g1', 1, 't', '', 1.0, "
+            "'[]', 'pending', NULL, NULL, '2026-08-03T00:00:00', '2026-08-03T00:00:00')"
+        )
+        conn.commit()
+
+    upgrade_result = run_migrate(
+        ["upgrade"], db_path=db_path, migrations_dir=migrations_dir
+    )
+
+    assert upgrade_result.returncode == 0, upgrade_result.stderr
+    assert _read_schema_version(db_path) == 2
+    with sqlite3.connect(str(db_path)) as conn:
+        goal = conn.execute("SELECT name FROM goals WHERE slug='g1'").fetchone()
+        task = conn.execute("SELECT title FROM tasks WHERE id='g1-T001'").fetchone()
+        started_at = conn.execute(
+            "SELECT started_at FROM tasks WHERE id='g1-T001'"
+        ).fetchone()
+    assert goal[0] == "goal one"
+    assert task[0] == "t"
+    assert started_at[0] is None  # new column present, but data untouched
