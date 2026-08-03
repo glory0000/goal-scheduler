@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}{{ goal.name if goal else "目标不存在" }} - 任务看板{% endblock %}
+{% block content %}
+  {% if not goal %}
+    <section class="empty-state"><h1>目标不存在</h1><p><a href="{{ url_for('index') }}">返回目标列表</a></p></section>
+  {% else %}
+    <header class="page-header">
+      <div>
+        <h1>{{ goal.name }}</h1>
+        <p>{{ goal.description or "暂无描述" }}</p>
+      </div>
+      <span class="status status-{{ goal.status }}">{{ status_label[goal.status] }}</span>
+    </header>
+    <p class="meta">创建于 {{ goal.created_at|replace("T", " ") }}</p>
+    <section class="summary-line">
+      {{ summary.total }} 个任务，{{ summary.completed }} 个已完成，完成率 {{ summary.progress }}%，总预估 {{ "%.1f"|format(summary.estimated_hours) }} 小时
+    </section>
+    {% if task_rows %}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>标题</th><th>小时</th><th>依赖</th><th>状态</th><th>上次提醒</th><th>完成时间</th></tr></thead>
+          <tbody>
+            {% for row in task_rows %}
+              <tr>
+                <td>{{ row.task.id }}</td>
+                <td>{{ row.task.title }}</td>
+                <td>{{ "%.1f"|format(row.task.estimated_hours or 0) }}</td>
+                <td>
+                  {% if row.dependencies %}
+                    {% for dep in row.dependencies %}→ {{ dep.id }} {{ "✓" if dep.done else "未完成" }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+                  {% else %}—{% endif %}
+                </td>
+                <td><span class="status status-{{ row.task.status }}">{{ status_label[row.task.status] }}</span></td>
+                <td>{{ row.last_reminded }}</td>
+                <td>{{ row.completed }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <section class="empty-state"><p>该目标暂无任务</p></section>
+    {% endif %}
+  {% endif %}
+{% endblock %}

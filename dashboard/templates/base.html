@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}任务看板{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <nav class="top-nav">
+    <div class="nav-links">
+      <a href="{{ url_for('index') }}">目标</a>
+      <a href="/today">今日</a>
+      <a href="/stats">统计</a>
+    </div>
+    <span class="hint">手动按 F5 刷新</span>
+  </nav>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
