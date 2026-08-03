@@ -100,13 +100,13 @@ def test_init_is_idempotent(tmp_path):
 
 
 def test_upgrade_rejects_db_without_init(tmp_path):
-    db_path = tmp_path / "no_init.db"
+    db_path = tmp_path / "uninitialized.db"
     db_path.write_bytes(b"")  # exists but empty / not a SQLite DB
 
     result = run_migrate(["upgrade"], db_path=db_path)
 
     assert result.returncode == 1, result.stderr
-    assert "init" in result.stderr.lower()
+    assert "migrate.py init" in result.stderr
 
 
 def test_upgrade_is_noop_when_no_pending_migrations(tmp_path):
