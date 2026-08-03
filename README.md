@@ -39,7 +39,16 @@ bash scripts/simulate_reminder.sh "2026-08-04 21:00"
 bash scripts/break_session.sh
 ```
 
-## See also
+## Fallback cron
 
-- Design spec: `docs/superpowers/specs/2026-08-03-todo-scheduler-design.md`
-- Implementation plan: `docs/superpowers/plans/2026-08-03-todo-scheduler.md`
+The system relies on a single cc-connect cron to rebuild broken timer chains. Verify with:
+
+```bash
+cc-connect cron list
+```
+
+Expected: 1 job at `5 0 * * *` (00:05 daily). If missing, recreate:
+
+```bash
+cc-connect cron add --cron "5 0 * * *" --prompt "<see commit history>" --desc "Todo scheduler: daily reminder chain rebuild"
+```
