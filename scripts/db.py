@@ -81,6 +81,117 @@ def update_goal_counts(slug: str, total: int, completed: int) -> None:
         )
 
 
+# ============ tasks table ============
+
+def create_task(
+    id: str,
+    goal_slug: str,
+    sequence: int,
+    title: str,
+    description: str,
+    estimated_hours: float,
+    depends_on: list[str],
+) -> None:
+    """Insert a new task in 'pending' status."""
+    ts = now_iso()
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO tasks (id, goal_slug, sequence, title, description,
+                                  estimated_hours, depends_on, status,
+                                  created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+            (
+                id, goal_slug, sequence, title, description,
+                estimated_hours, json.dumps(depends_on), ts, ts,
+            ),
+        )
+
+
+def get_task(id: str) -> dict | None:
+    """Fetch a task by id, or None."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (id,)).fetchone()
+        if row is None:
+            return None
+        d = _row_to_dict(row)
+        d["depends_on"] = json.loads(d["depends_on"]) if d["depends_on"] else []
+        return d
+
+
+def list_tasks(goal_slug: str | None = None, status: str | None = None) -> list[dict]:
+    """List tasks, optionally filtered by goal and/or status."""
+    query = "SELECT * FROM tasks WHERE 1=1"
+    params: list = []
+    if goal_slug is not None:
+        query += " AND goal_slug = ?"
+        params.append(goal_slug)
+    if status is not None:
+        query += " AND status = ?"
+        params.append(status)
+    query += " ORDER BY goal_slug, sequence"
+    with get_conn() as conn:
+        rows = conn.execute(query, params).fetchall()
+        out = []
+        for r in rows:
+            d = _row_to_dict(r)
+            d["depends_on"] = json.loads(d["depends_on"]) if d["depends_on"] else []
+            out.append(d)
+        return out
+
+
+def list_eligible_tasks(goal_slug: str | None = None) -> list[dict]:
+    """Pending tasks whose `depends_on` are all done."""
+    candidates = list_tasks(goal_slug=goal_slug, status="pending")
+    out = []
+    for t in candidates:
+        all_done = True
+        for dep_id in t["depends_on"]:
+            dep = get_task(dep_id)
+            if dep is None or dep["status"] != "done":
+                all_done = False
+                break
+        if all_done:
+            out.append(t)
+    return out
+
+
+def update_task_status(id: str, status: str) -> None:
+    """Update task status. If 'done', also stamp completed_at."""
+    if status not in ("pending", "in_progress", "done", "skipped"):
+        raise ValueError(f"Invalid status: {status}")
+    ts = now_iso()
+    completed_at = ts if status == "done" else None
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE tasks SET status = ?, completed_at = ?, updated_at = ?
+               WHERE id = ?""",
+            (status, completed_at, ts, id),
+        )
+
+
+def mark_task_reminded(id: str) -> None:
+    """Stamp task's last_reminded_at to now."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET last_reminded_at = ? WHERE id = ?",
+            (now_iso(), id),
+        )
+
+
+def count_tasks_by_status(goal_slug: str) -> dict[str, int]:
+    """Return a {status: count} dict for a goal's tasks."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT status, COUNT(*) AS n FROM tasks
+               WHERE goal_slug = ? GROUP BY status""",
+            (goal_slug,),
+        ).fetchall()
+        out = {"pending": 0, "in_progress": 0, "done": 0, "skipped": 0}
+        for r in rows:
+            out[r["status"]] = r["n"]
+        return out
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) >= 2 and sys.argv[1] == "init":
