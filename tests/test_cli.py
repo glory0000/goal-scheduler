@@ -255,8 +255,13 @@ def test_today_json_output(tmp_path):
     assert parsed["date"] == date.today().isoformat()
     assert "weekday" in parsed
     assert isinstance(parsed["slot_rows"], list)
-    # 只需验证JSON结构正确，不依赖具体的时间安排结果
-    assert "remaining" in parsed
+    # T013 must be scheduled in some slot (search, don't index — the result
+    # depends on what time of day the test runs at, since compute_schedule
+    # uses the real current time).
+    scheduled_tasks = [row.get("task") for row in parsed["slot_rows"]]
+    assert "a-stock-quant-T013" in scheduled_tasks
+    scheduled_goals = [row.get("goal") for row in parsed["slot_rows"]]
+    assert "a-stock-quant" in scheduled_goals
 
 
 def test_today_no_assignments(tmp_path):
