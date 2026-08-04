@@ -236,6 +236,101 @@ def subcommand_goal_add(args, as_json: bool) -> int:
     return 0
 
 
+def subcommand_goal_list(args, as_json: bool) -> int:
+    """List goals. Default excludes archived; --all includes them;
+    --status filters to exactly one status."""
+    if args.all:
+        goals = db.list_goals()
+    elif args.status:
+        goals = db.list_goals(status=args.status)
+    else:
+        goals = db.list_goals(status="active")
+    if as_json:
+        print(to_json(goals))
+        return 0
+    if not goals:
+        print("(no goals)")
+        return 0
+    for g in goals:
+        label = STATUS_LABELS.get(g["status"], g["status"])
+        print(f"- {g['slug']:<20} {label}")
+    return 0
+
+
+def subcommand_goal_show(args, as_json: bool) -> int:
+    """Show one goal by slug. Exits 2 if not found."""
+    goal = db.get_goal(args.slug)
+    if goal is None:
+        _emit_error(f"Goal '{args.slug}' not found.", code=2)
+    if as_json:
+        print(to_json(goal))
+        return 0
+    label = STATUS_LABELS.get(goal["status"], goal["status"])
+    print(f"slug：       {goal['slug']}")
+    print(f"name：       {goal['name']}")
+    print(f"status：     {goal['status']} ({label})")
+    print(f"description：{goal['description'] or '(none)'}")
+    return 0
+
+
+def subcommand_goal_update(args, as_json: bool) -> int:
+    """Update a goal's status. Rejects 'archived' (that is `goal delete`'s
+    job). Re-renders index.md only when the status actually changed."""
+    if args.status == "archived":
+        _emit_error(
+            f"Cannot set status to 'archived'. "
+            f"Use `goal delete {args.slug}` to archive a goal.",
+            code=2,
+        )
+    current = db.get_goal(args.slug)
+    if current is None:
+        _emit_error(f"Goal '{args.slug}' not found.", code=2)
+    changed = current["status"] != args.status
+    if changed:
+        db.update_goal_status(args.slug, args.status)
+        _autosync_index_md()
+    if as_json:
+        print(to_json({
+            "slug": args.slug, "status": args.status, "changed": changed,
+        }))
+    else:
+        verb = "updated to" if changed else "already"
+        print(f"Goal '{args.slug}' {verb} {args.status}.")
+    return 0
+
+
+def subcommand_goal_delete(args, as_json: bool) -> int:
+    """Soft-delete: set status='archived'. Idempotent — re-deleting an
+    already-archived goal exits 0 without re-rendering index.md."""
+    try:
+        changed = db.archive_goal(args.slug)
+    except ValueError as exc:
+        _emit_error(f"Error: {exc}", code=2)
+    if changed:
+        _autosync_index_md()
+    if as_json:
+        print(to_json({"slug": args.slug, "archived": changed}))
+    else:
+        verb = "archived" if changed else "already archived"
+        print(f"Goal '{args.slug}' {verb}.")
+    return 0
+
+
+def subcommand_goal_restore(args, as_json: bool) -> int:
+    """Restore an archived goal to 'active'. Strict: exits 2 if the goal is
+    missing or is not currently archived."""
+    try:
+        db.restore_goal(args.slug)
+    except ValueError as exc:
+        _emit_error(f"Error: {exc}", code=2)
+    _autosync_index_md()
+    if as_json:
+        print(to_json({"slug": args.slug, "status": "active"}))
+    else:
+        print(f"Goal '{args.slug}' restored to active.")
+    return 0
+
+
 def subcommand_task_add(args, as_json: bool) -> int:
     # Validate task id format: <slug>-T<digits>
     m = re.match(r"^(?P<slug>[a-z0-9][a-z0-9-]{0,62})-T\d{3,}$", args.task_id)
@@ -378,6 +473,16 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Emit a single JSON object on stdout")
     sub = p.add_subparsers(dest="command", required=True)
 
+    # Shared parent so --json is accepted whether it appears before or after
+    # the subcommand (argparse inherits the flag onto the subparser).
+    # SUPPRESS keeps the subparser from clobbering a top-level --json with
+    # False when the flag was given before the subcommand.
+    json_parent = argparse.ArgumentParser(add_help=False)
+    json_parent.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS,
+        help="Emit a single JSON object on stdout",
+    )
+
     sub.add_parser("status", help="Snapshot: goals, focus, next task")
 
     sub.add_parser("today",
@@ -389,6 +494,38 @@ def _build_parser() -> argparse.ArgumentParser:
     ga.add_argument("slug")
     ga.add_argument("name")
     ga.add_argument("--description", default="")
+
+    gl = goal_sub.add_parser("list", help="List goals (default: hide archived)",
+                             parents=[json_parent])
+    gl.add_argument("--status",
+                    choices=["active", "paused", "completed", "archived"])
+    gl.add_argument("--all", action="store_true", help="Include archived goals")
+
+    gsh = goal_sub.add_parser("show", help="Show a single goal",
+                              parents=[json_parent])
+    gsh.add_argument("slug")
+
+    gu = goal_sub.add_parser("update", help="Update a goal's status",
+                             parents=[json_parent])
+    gu.add_argument("slug")
+    # 'archived' is accepted by the parser but rejected in the body so the
+    # user gets an actionable hint ("use goal delete") instead of argparse's
+    # bare "invalid choice".
+    gu.add_argument(
+        "--status",
+        required=True,
+        choices=["active", "paused", "completed", "archived"],
+        help="New status (use 'goal delete' to archive)",
+    )
+
+    gd = goal_sub.add_parser("delete",
+                             help="Soft-delete a goal (sets status=archived)",
+                             parents=[json_parent])
+    gd.add_argument("slug")
+
+    gr = goal_sub.add_parser("restore", help="Restore an archived goal to active",
+                             parents=[json_parent])
+    gr.add_argument("slug")
 
     task_p = sub.add_parser("task", help="Task operations")
     task_sub = task_p.add_subparsers(dest="task_command", required=True)
@@ -409,14 +546,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Use a parents group so --json is accepted whether it appears before
     # or after the subcommand (argparse inherits the flag onto the subparser).
-    sync_md_parent = argparse.ArgumentParser(add_help=False)
-    sync_md_parent.add_argument(
-        "--json", action="store_true", default=argparse.SUPPRESS,
-        help="Emit a single JSON object on stdout",
-    )
     sub.add_parser("sync-md",
                    help="Regenerate goals/index.md from current DB state",
-                   parents=[sync_md_parent])
+                   parents=[json_parent])
 
     focus_p = sub.add_parser("focus", help="Today's focus")
     focus_sub = focus_p.add_subparsers(dest="focus_command", required=True)
@@ -447,6 +579,16 @@ def run(args: list[str]) -> int:
             return subcommand_today(parsed, as_json)
         if parsed.command == "goal" and parsed.goal_command == "add":
             return subcommand_goal_add(parsed, as_json)
+        if parsed.command == "goal" and parsed.goal_command == "list":
+            return subcommand_goal_list(parsed, as_json)
+        if parsed.command == "goal" and parsed.goal_command == "show":
+            return subcommand_goal_show(parsed, as_json)
+        if parsed.command == "goal" and parsed.goal_command == "update":
+            return subcommand_goal_update(parsed, as_json)
+        if parsed.command == "goal" and parsed.goal_command == "delete":
+            return subcommand_goal_delete(parsed, as_json)
+        if parsed.command == "goal" and parsed.goal_command == "restore":
+            return subcommand_goal_restore(parsed, as_json)
         if parsed.command == "task" and parsed.task_command == "add":
             return subcommand_task_add(parsed, as_json)
         if parsed.command == "task" and parsed.task_command == "update":
