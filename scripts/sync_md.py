@@ -158,6 +158,7 @@ class SyncResult:
     unchanged: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     header_preserved: bool = False
+    tasks_by_goal: dict[str, list[dict]] = field(default_factory=dict)
 
 
 def _status_key_from_label(label: str) -> str | None:
@@ -294,4 +295,5 @@ def sync_index_md(goals_root: Path) -> SyncResult:
         unchanged=unchanged,
         warnings=warnings,
         header_preserved=header_preserved,
+        tasks_by_goal=tasks_by_goal,
     )

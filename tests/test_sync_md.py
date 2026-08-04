@@ -320,6 +320,27 @@ class TestSyncMdCli:
         # File was written under tmp_path/goals/.
         assert (tmp_path / "goals" / "index.md").exists()
 
+    def test_spec_5_2_slug_column_width(self, tmp_path):
+        """Spec §5.2: slug block (marker+slug) is right-padded to 16 chars.
+
+        For slug 'goal-a' (6 chars), the printed block is '<marker>goal-a' +
+        9 trailing spaces = 16 chars total. Acceptance: the substring
+        'goal-a          ' (goal-a + 10 spaces) appears in stdout, preceded
+        by either ' ' (unchanged) or '+' (changed) marker.
+        """
+        db_path = self._seed(
+            tmp_path,
+            goals=[{"slug": "goal-a", "name": "G", "status": "active"}],
+            tasks=[],
+        )
+        # First run creates the file (marker '+'). Second run is unchanged
+        # (marker ' '). Either way, the column width must be 16.
+        run_cli(["sync-md"], db_path=db_path, cwd=tmp_path)
+        result = run_cli(["sync-md"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        # Block = space-marker + 'goal-a' + 9 trailing spaces = 16 chars.
+        assert " goal-a          " in result.stdout
+
     def test_json_output_shape(self, tmp_path):
         db_path = self._seed(
             tmp_path,

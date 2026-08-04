@@ -805,9 +805,9 @@ def subcommand_sync_md(args, as_json: bool) -> int:
         for g in db.list_goals():
             slug = g["slug"]
             label = label_map.get(g["status"], g["status"])
-            pct = compute_completion_pct(db.list_tasks(goal_slug=slug))
+            pct = compute_completion_pct(result.tasks_by_goal.get(slug, []))
             marker = "+" if slug in changed_set else " "
-            print(f"- {marker}{slug:<20} ({label} {pct}%)")
+            print(f"- {marker}{slug:<16} ({label} {pct}%)")
     return 0
 
 
