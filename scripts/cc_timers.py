@@ -154,9 +154,8 @@ def _add_via_subprocess(
     subprocess.run(cmd, capture_output=True, text=True, check=True)
     # Re-list to discover the new id (cc-connect's `add` output is
     # implementation-defined; listing is the canonical source).
-    target_time = fire_at_iso
     for t in _list_all_via_subprocess():
-        if t["fire_at"] == target_time:
+        if t["fire_at"] == fire_at_iso:
             return t
     # If the new entry doesn't appear yet, return a synthetic placeholder.
     return {"id": "", "fire_at": fire_at_iso, "description": description or ""}
