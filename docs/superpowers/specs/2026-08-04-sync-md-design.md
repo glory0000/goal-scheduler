@@ -22,7 +22,7 @@ The per-goal progress section inside `goals/<slug>/goal.md` is **already** auto-
 | Scope (v1) | Auto-sync `goals/index.md` only. `goals/<slug>/goal.md` progress section is already handled by `db.write_goal_md_progress()`. |
 | Trigger | **Both** manual CLI invocation (`python scripts/cli.py sync-md`) and automatic after successful `goal add` / `task add` / `task update`. `rebuild-timers` does NOT trigger sync (unrelated surface). |
 | Preservation | Preserve everything before the first `- [` (link) line. Manual header text, comments, blank lines all kept. From the first `- [` onward, the file is fully regenerated. |
-| List scope | **All goals** (active / paused / completed). Hidden goals are not in scope for v1 — every DB row is rendered. |
+| List scope | **All goals** (active / paused / completed). Every DB row is rendered; no filtering beyond status grouping. |
 | Group order | Fixed: `active → paused → completed`. Empty groups emit no heading. |
 | Sort | Within each group: ascending by `slug` (Python `sorted()`, Unicode codepoint order — slugs are `[a-z0-9-]` so this is plain ASCII). |
 | Sections | `## 进行中`, `## 已暂停`, `## 已完成` as `## ` headings separating groups. |
@@ -245,7 +245,7 @@ Called from the end of:
 |---|---|
 | `subcommand_goal_add` | After `db.create_goal()` returns, before stdout |
 | `subcommand_task_add` | After `db.create_task()` returns, before stdout |
-| `subcommand_task_update` | After `db.update_task_status()` when the status actually changed (skip no-op idempotent calls) |
+| `subcommand_task_update` | After `db.update_task_status()` when the prior `task["status"]` differs from the new status (skip no-op idempotent reapply) |
 
 `subcommand_rebuild_timers` does NOT call this helper (no DB write, no goal / task impact).
 
