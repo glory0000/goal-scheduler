@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Unified CLI for the todo scheduler.
 
-Subcommands: status, today, goal add, task add, task update, focus.
+Subcommands: status, today, goal add, task add, task update, focus,
+rebuild-timers.
 All errors go to stderr. Success goes to stdout as human text by default
 or as a single JSON object when --json is set.
 """
@@ -404,6 +405,171 @@ def run(args: list[str]) -> int:
 
     _emit_error("Error: no handler matched", code=1)
     return 1  # unreachable
+
+
+def main() -> None:
+    sys.exit(run(sys.argv[1:]))
+
+
+# ---- rebuild-timers helpers (pure, no I/O) ----
+
+import re as _re_rebuild  # local alias to keep the global imports untouched
+
+_OWN_DESC_SLOT_RE = _re_rebuild.compile(
+    r"^Todo scheduler: \d{4}-\d{2}-\d{2} (\d{2}:\d{2})"
+)
+_OWN_DESC_TASK_RE = _re_rebuild.compile(
+    r" - ([a-z0-9][a-z0-9-]{0,62}-T\d{3,})$"
+)
+
+
+def parse_slot_start_from_description(description: str) -> str | None:
+    """Extract 'HH:MM' from a 'Todo scheduler: <date> <HH:MM> <label> [- <task_id>]' description.
+
+    Returns None if the description is not in our format (e.g., foreign timers
+    or empty input). This is the only place that knows the description format.
+    """
+    if not description:
+        return None
+    m = _OWN_DESC_SLOT_RE.match(description)
+    return m.group(1) if m else None
+
+
+def parse_task_id_from_description(description: str) -> str | None:
+    """Extract the task_id from the '- <task_id>' suffix of our own descriptions.
+
+    Returns None if the description is missing the suffix (legacy timers or
+    foreign entries). The matching shape is `<slug>-T<digits>` to stay
+    consistent with task_add's validation.
+    """
+    if not description:
+        return None
+    m = _OWN_DESC_TASK_RE.search(description)
+    return m.group(1) if m else None
+
+
+def build_slot_description(
+    date: str, slot_start: str, slot_label: str, task_id: str,
+) -> str:
+    """Build the cc-connect timer description for a slot we own.
+
+    Format: 'Todo scheduler: <date> <HH:MM> <label> - <task_id>'.
+    parse_slot_start_from_description must be able to recover slot_start from
+    this string; parse_task_id_from_description must be able to recover task_id.
+    """
+    return f"Todo scheduler: {date} {slot_start} {slot_label} - {task_id}"
+
+
+def build_slot_prompt(
+    date: str, slot_start: str, slot_end: str, slot_label: str, task_id: str,
+) -> str:
+    """Build the natural-language prompt that a per-slot timer fires with.
+
+    This is the same template the morning cron's per-slot prompt uses today
+    (see the spec's §4.5). The first line is the user-facing title and embeds
+    the task_id so parse_task_id_from_description can recover it from the
+    description. The remaining lines walk Claude through the 6-step reminder
+    flow.
+    """
+    # Use forward slashes regardless of OS — the prompt is interpreted by
+    # bash on the cron side, and the morning cron's existing prompt uses
+    # forward slashes too.
+    repo_root = SCRIPTS_DIR.parent.as_posix()
+    return (
+        f"Free slot 启动: {date} {slot_start} {slot_label} "
+        f"({slot_start}-{slot_end}) - {task_id}.\n"
+        "\n"
+        "Send a Feishu reminder for the next pending task. Steps:\n"
+        f"1. cd to {repo_root}\n"
+        "2. Read data/todos.db: python -c \"import sys; sys.path.insert(0,'scripts'); "
+        "import db; focus=db.get_today_focus(); print('focus:', focus)\"\n"
+        "3. Compute plan: python -c \"import sys; sys.path.insert(0,'scripts'); "
+        "import scheduler, db; from datetime import datetime; "
+        "plan=scheduler.compute_schedule(db.get_today_focus(), "
+        f"'{date}', '{slot_start}', max_slots=1); print(plan)\"\n"
+        "4. If plan has an entry: send reminder via reminder.format_reminder("
+        "plan[0]['date'], plan[0]['slot_start'], plan[0]['slot_end'], "
+        "db.get_goal(plan[0]['goal_slug']), db.get_task(plan[0]['task_id']))\n"
+        f"5. If no plan: send '今日 {slot_start} 无待办任务'\n"
+        "6. After sending, set up the next timer for the next free slot via: "
+        "cc-connect timer add --at <next-slot-time> --prompt <similar>\n"
+        "\n"
+        "Your reply IS the Feishu message to send. Reply in Chinese.\n"
+    )
+
+
+def reconcile_timers(planned: list[dict], actual: list[dict]) -> dict:
+    """Diff planned vs actual timer sets by (slot_start, task_id) tuple.
+
+    planned: [{'slot_start', 'slot_end', 'slot_label', 'task_id', 'goal_slug'}, ...]
+    actual:  [{'id', 'fire_at', 'description', 'slot_start', 'task_id'}, ...]
+        (slot_start and task_id are parsed from the description;
+         legacy timers and foreign timers have task_id=None and are excluded)
+
+    Returns {'to_add': [planned entries without a (slot_start, task_id) match in actual],
+             'to_remove': [actual entries without a (slot_start, task_id) match in planned]}.
+
+    Actual entries with task_id=None are ignored — neither kept nor removed.
+    Past actual entries are not the concern of this function; callers should
+    pre-filter via cc_timers.list_today_remaining.
+    """
+    planned_keys = {
+        (p["slot_start"], p["task_id"])
+        for p in planned
+    }
+    actual_keys = {
+        (a["slot_start"], a["task_id"])
+        for a in actual
+        if a.get("slot_start") is not None and a.get("task_id") is not None
+    }
+    to_add = [
+        p for p in planned
+        if (p["slot_start"], p["task_id"]) not in actual_keys
+    ]
+    to_remove = [
+        a for a in actual
+        if a.get("slot_start") is not None and a.get("task_id") is not None
+        and (a["slot_start"], a["task_id"]) not in planned_keys
+    ]
+    return {"to_add": to_add, "to_remove": to_remove}
+
+
+def format_rebuild_summary(
+    date: str,
+    added: list[dict],
+    removed: list[dict],
+    kept: list[dict],
+    ignored_foreign: list[dict],
+    today_had_no_slots: bool = False,
+    no_focus: bool = False,
+) -> str:
+    """Render the human-readable summary for `rebuild-timers` output.
+
+    Mirrors the format from the spec's §4.4 example. The "no slots" and
+    "no focus" cases override the normal summary lines.
+    """
+    if no_focus:
+        return f"Rebuilt timers for {date}: no focus set, no timers scheduled"
+    if today_had_no_slots:
+        return f"Rebuilt timers for {date}: no remaining slots today"
+    lines = [f"Rebuilt timers for {date}:"]
+    lines.append(
+        f"  added   {len(added)}"
+        + (f"  ({', '.join(_fmt_added(a) for a in added)})" if added else "")
+    )
+    lines.append(f"  removed {len(removed)}")
+    lines.append(f"  kept    {len(kept)}")
+    if ignored_foreign:
+        descs = ", ".join(f'"{t.get("description", "")}"' for t in ignored_foreign)
+        lines.append(f"  ignored {len(ignored_foreign)} (foreign: {descs})")
+    return "\n".join(lines)
+
+
+def _fmt_added(entry: dict) -> str:
+    """Compact 'HH:MM <label> → T<id>' for the added-line summary."""
+    label = entry.get("slot_label", "")
+    tid = entry.get("task_id", "")
+    return f"{entry['slot_start']} {label} → {tid}"
 
 
 def main() -> None:
