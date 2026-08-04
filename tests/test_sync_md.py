@@ -413,3 +413,61 @@ class TestSyncMdCli:
         second = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
         assert first == second
 
+
+# -------------------- TestAutosyncIntegration --------------------
+
+class TestAutosyncIntegration:
+    def _seed_db(self, tmp_path: Path) -> Path:
+        db_path = tmp_path / "todos.db"
+        _init_db(db_path)
+        return db_path
+
+    def test_goal_add_triggers_sync(self, tmp_path):
+        db_path = self._seed_db(tmp_path)
+        result = run_cli(
+            ["goal", "add", "newgoal", "New Goal", "--description", ""],
+            db_path=db_path, cwd=tmp_path,
+        )
+        assert result.returncode == 0, result.stderr
+        # goals/index.md must exist and contain newgoal.
+        index = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
+        assert "## 进行中" in index
+        assert "[New Goal](newgoal/goal.md)" in index
+
+    def test_task_add_triggers_sync(self, tmp_path):
+        db_path = self._seed_db(tmp_path)
+        # First add a goal so task add succeeds.
+        run_cli(
+            ["goal", "add", "tg", "TaskGoal"],
+            db_path=db_path, cwd=tmp_path,
+        )
+        # Add a task — should keep tg in the index.
+        result = run_cli(
+            ["task", "add", "tg-T001", "tg", "1", "First task", "--hours", "1.0"],
+            db_path=db_path, cwd=tmp_path,
+        )
+        assert result.returncode == 0, result.stderr
+        index = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
+        assert "[TaskGoal](tg/goal.md)" in index
+
+    def test_task_update_to_done_updates_pct(self, tmp_path):
+        db_path = self._seed_db(tmp_path)
+        run_cli(["goal", "add", "g", "G"], db_path=db_path, cwd=tmp_path)
+        run_cli(
+            ["task", "add", "g-T001", "g", "1", "T1", "--hours", "1.0"],
+            db_path=db_path, cwd=tmp_path,
+        )
+        run_cli(
+            ["task", "add", "g-T002", "g", "2", "T2", "--hours", "1.0"],
+            db_path=db_path, cwd=tmp_path,
+        )
+        # Mark T001 done.
+        result = run_cli(
+            ["task", "update", "g-T001", "done"],
+            db_path=db_path, cwd=tmp_path,
+        )
+        assert result.returncode == 0, result.stderr
+        index = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
+        # 1 of 2 done = 50%
+        assert "完成率 50%" in index
+

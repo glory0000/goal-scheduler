@@ -86,6 +86,19 @@ python scripts/cli.py rebuild-timers
 
 python scripts/cli.py rebuild-timers --json
 # Output: {"date": "2026-08-04", "added": [...], ...}
+
+# Regenerate goals/index.md from current DB state (manual)
+python scripts/cli.py sync-md
+# Output: Synced 3 goals to goals/index.md (active=2, paused=1, completed=1)
+#           - +example-goal      (进行中 50%)
+#           -  example-goal-2    (进行中 0%)
+#           - ~paused-goal       (已暂停 33%)
+#           - ~old-completed     (已完成 100%)
+
+python scripts/cli.py sync-md --json
+# Output: {"path": "goals/index.md", "synced_count": 3, ...}
+
+# Auto-fires after goal add / task add / task update — no need to run manually.
 ```
 
 Exit codes: `0` success, `1` input error, `2` database not initialized,

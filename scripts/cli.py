@@ -55,6 +55,30 @@ def _require_initialized_db() -> None:
         _emit_error(f"Error: database error: {exc}", code=2)
 
 
+def _autosync_index_md() -> None:
+    """Re-render goals/index.md after a successful CRUD op.
+
+    Captures all exceptions and writes them to stderr. Never raises,
+    never exits. The calling subcommand has already succeeded; sync
+    failure must not roll back the user's operation.
+
+    On a DB-uninitialized error, silently does nothing (the calling
+    subcommand already exited 2 before reaching us).
+    """
+    try:
+        # Skip silently if schema_version is absent.
+        with db.get_conn() as conn:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='schema_version'"
+            ).fetchone()
+            if row is None:
+                return
+        sync_index_md(Path("goals"))
+    except Exception as exc:
+        print(f"warning: sync-md failed: {exc}", file=sys.stderr)
+
+
 def _emit_error(message: str, code: int) -> None:
     """Write a human-readable error to stderr and exit with `code`.
 
@@ -197,6 +221,7 @@ def subcommand_goal_add(args, as_json: bool) -> int:
         }))
     else:
         print(f"Goal '{args.slug}' created.")
+    _autosync_index_md()
     return 0
 
 
@@ -247,6 +272,7 @@ def subcommand_task_add(args, as_json: bool) -> int:
         }))
     else:
         print(f"Task {created['id']} created.")
+    _autosync_index_md()
     return 0
 
 
@@ -290,6 +316,7 @@ def subcommand_task_update(args, as_json: bool) -> int:
         elif args.status == "done" and updated.get("completed_at"):
             suffix = f" at {updated['completed_at']}"
         print(f"Task {updated['id']} marked {args.status}{suffix}.")
+    _autosync_index_md()
     return 0
 
 
