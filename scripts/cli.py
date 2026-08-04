@@ -24,7 +24,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import db  # noqa: E402
 import scheduler  # noqa: E402
-from cli_output import format_status_overview, to_json  # noqa: E402
+from cli_output import format_status_overview, format_today_view, to_json  # noqa: E402
 
 # ---- shared constants ----
 
@@ -120,11 +120,82 @@ def subcommand_status(args, as_json: bool) -> int:
 # ---- stubs for later tasks ----
 
 def subcommand_today(args, as_json: bool) -> int:
-    raise NotImplementedError("not yet implemented")
+    today = date.today()
+    slots = scheduler.get_slots_for_date(today.isoformat())
+    focus = db.get_today_focus()
+    plan = scheduler.compute_schedule(
+        focus, today.isoformat(), datetime.now().strftime("%H:%M"),
+        max_slots=len(slots),
+    )
+    today_plan = [p for p in plan if p["date"] == today.isoformat()]
+    assignments = {p["slot_start"]: p for p in today_plan}
+    slot_rows = []
+    scheduled_ids: set[str] = set()
+    for slot in slots:
+        a = assignments.get(slot["start"])
+        if a is None:
+            slot_rows.append({
+                "slot_start": slot["start"], "slot_end": slot["end"],
+                "task_id": None, "task_title": None,
+                "goal_slug": None, "goal_name": None,
+            })
+            continue
+        task = db.get_task(a["task_id"])
+        goal = db.get_goal(a["goal_slug"])
+        scheduled_ids.add(task["id"])
+        slot_rows.append({
+            "slot_start": slot["start"], "slot_end": slot["end"],
+            "task_id": task["id"], "task_title": task["title"],
+            "goal_slug": goal["slug"], "goal_name": goal["name"],
+        })
+    active_goals = db.list_goals(status="active")
+    pending = [
+        t for g in active_goals
+        for t in db.list_tasks(goal_slug=g["slug"], status="pending")
+    ]
+    remaining = sum(t["id"] not in scheduled_ids for t in pending)
+    weekday_cn = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")[
+        today.weekday()
+    ]
+    if as_json:
+        out_rows = [
+            {"slot": f"{r['slot_start']}-{r['slot_end']}",
+             "task": r["task_id"], "goal": r["goal_slug"]}
+            for r in slot_rows
+        ]
+        print(to_json({
+            "date": today.isoformat(),
+            "weekday": weekday_cn,
+            "focus_slug": focus,
+            "slot_rows": out_rows,
+            "remaining": remaining,
+        }))
+    else:
+        nonempty = [r for r in slot_rows if r["task_id"]]
+        print(format_today_view(
+            date_str=today.isoformat(), weekday=weekday_cn,
+            focus=focus, slot_rows=nonempty, remaining=remaining,
+        ))
+    return 0
 
 
 def subcommand_goal_add(args, as_json: bool) -> int:
-    raise NotImplementedError("not yet implemented")
+    _validate_slug(args.slug)
+    if db.get_goal(args.slug) is not None:
+        _emit_error(f"Goal '{args.slug}' already exists.", code=1)
+    db.create_goal(args.slug, args.name, args.description or "")
+    created = db.get_goal(args.slug)
+    if as_json:
+        print(to_json({
+            "slug": created["slug"],
+            "name": created["name"],
+            "description": created["description"] or "",
+            "status": created["status"],
+            "created_at": created["created_at"],
+        }))
+    else:
+        print(f"Goal '{args.slug}' created.")
+    return 0
 
 
 def subcommand_task_add(args, as_json: bool) -> int:
