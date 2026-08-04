@@ -22,6 +22,7 @@ STATUS_LABELS = {
     "active": "进行中",
     "paused": "已暂停",
     "completed": "已完成",
+    "archived": "已归档",
     "pending": "待办",
     "in_progress": "进行中",
     "done": "已完成",
@@ -191,7 +192,12 @@ def create_app() -> Flask:
         elif show_all:
             goals = db.list_goals()
         else:
-            goals = db.list_goals(status="active")
+            # Default: show all non-archived goals (active + paused + completed).
+            # Filter negatively so paused/completed remain visible.
+            goals = [
+                g for g in db.list_goals()
+                if g["status"] != "archived"
+            ]
         rows = [_goal_row(goal) for goal in goals]
         return render_template(
             "index.html",

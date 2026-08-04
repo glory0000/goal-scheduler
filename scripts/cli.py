@@ -251,13 +251,18 @@ def subcommand_goal_add(args, as_json: bool) -> int:
 
 def subcommand_goal_list(args, as_json: bool) -> int:
     """List goals. Default excludes archived; --all includes them;
-    --status filters to exactly one status."""
-    if args.all:
-        goals = db.list_goals()
-    elif args.status:
+    --status filters to exactly one status (and wins over --all)."""
+    if args.status:
         goals = db.list_goals(status=args.status)
+    elif args.all:
+        goals = db.list_goals()
     else:
-        goals = db.list_goals(status="active")
+        # Default: all non-archived goals (active + paused + completed).
+        # Filter negatively so paused/completed remain visible.
+        goals = [
+            g for g in db.list_goals()
+            if g["status"] != "archived"
+        ]
     if as_json:
         print(to_json(goals))
         return 0
@@ -441,11 +446,12 @@ def subcommand_task_update(args, as_json: bool) -> int:
 
 def subcommand_task_list(args, as_json: bool) -> int:
     """List tasks. Default excludes archived; --all includes them;
-    --status filters to exactly one status. --goal narrows to one goal."""
-    if args.all:
-        tasks = db.list_tasks(goal_slug=args.goal)
-    elif args.status:
+    --status filters to exactly one status (and wins over --all).
+    --goal narrows to one goal."""
+    if args.status:
         tasks = db.list_tasks(goal_slug=args.goal, status=args.status)
+    elif args.all:
+        tasks = db.list_tasks(goal_slug=args.goal)
     else:
         tasks = [
             t for t in db.list_tasks(goal_slug=args.goal)

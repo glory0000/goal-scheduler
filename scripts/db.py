@@ -188,7 +188,7 @@ def update_task_status(id: str, status: str) -> None:
                    WHERE id = ?""",
                 (status, ts, ts, id),
             )
-        else:  # pending or skipped
+        else:  # pending, skipped, or archived
             conn.execute(
                 """UPDATE tasks SET status = ?, updated_at = ?
                    WHERE id = ?""",

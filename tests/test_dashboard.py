@@ -289,8 +289,13 @@ def _app_client(monkeypatch, tmp_path):
 
 
 def test_index_default_hides_archived(tmp_path, monkeypatch):
-    """GET / with no params hides archived goals."""
+    """GET / with no params hides only archived goals — paused/completed remain."""
     _seed_archived_goals(tmp_path, monkeypatch)
+    # Add paused and completed goals alongside the existing active + archived.
+    db.create_goal("paus", "Paused", "")
+    db.update_goal_status("paus", "paused")
+    db.create_goal("comp", "Completed", "")
+    db.update_goal_status("comp", "completed")
     client = _app_client(monkeypatch, tmp_path)
 
     rv = client.get("/")
@@ -298,6 +303,8 @@ def test_index_default_hides_archived(tmp_path, monkeypatch):
     assert rv.status_code == 200
     body = rv.get_data(as_text=True)
     assert "Alive" in body
+    assert "Paused" in body
+    assert "Completed" in body
     assert "Dead" not in body
 
 
@@ -315,7 +322,7 @@ def test_index_show_all_includes_archived(tmp_path, monkeypatch):
 
 
 def test_index_status_query(tmp_path, monkeypatch):
-    """GET /?status=archived shows only archived goals."""
+    """GET /?status=archived shows only archived goals and their badge renders."""
     _seed_archived_goals(tmp_path, monkeypatch)
     client = _app_client(monkeypatch, tmp_path)
 
@@ -325,6 +332,9 @@ def test_index_status_query(tmp_path, monkeypatch):
     body = rv.get_data(as_text=True)
     assert "Dead" in body
     assert "Alive" not in body
+    # C1: the archived status badge must render its label, not be empty.
+    # The badge is rendered as <span class="status status-archived">已归档</span>.
+    assert 'class="status status-archived">已归档</span>' in body
 
 
 def test_goal_detail_archived_banner(tmp_path, monkeypatch):
@@ -365,8 +375,8 @@ def test_task_detail_basic(tmp_path, monkeypatch):
     body = rv.get_data(as_text=True)
     assert "g-T001" in body
     assert "hello task" in body
-    # Parent goal link contains the slug "g"
-    assert "g" in body
+    # Parent goal link points at /goal/g (more specific than just "g" in body).
+    assert "/goal/g" in body
 
 
 def test_task_detail_archived_banner(tmp_path, monkeypatch):

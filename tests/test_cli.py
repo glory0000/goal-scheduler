@@ -1188,14 +1188,19 @@ def _seed_goals(db_path: Path, goals_spec):
 
 class TestGoalListCli:
     def test_default_hides_archived(self, tmp_path):
+        """Default `goal list` shows active/paused/completed but excludes archived."""
         db_path = tmp_path / "todos.db"
         _seed_goals(db_path, [
             {"slug": "alive", "name": "Alive", "status": "active"},
+            {"slug": "paus", "name": "Paused", "status": "paused"},
+            {"slug": "comp", "name": "Completed", "status": "completed"},
             {"slug": "dead", "name": "Dead", "status": "archived"},
         ])
         result = run_cli(["goal", "list"], db_path=db_path, cwd=tmp_path)
         assert result.returncode == 0, result.stderr
         assert "alive" in result.stdout
+        assert "paus" in result.stdout
+        assert "comp" in result.stdout
         assert "dead" not in result.stdout
 
     def test_all_includes_archived(self, tmp_path):
@@ -1220,6 +1225,21 @@ class TestGoalListCli:
         assert result.returncode == 0
         assert "a1" not in result.stdout
         assert "dead" in result.stdout
+
+    def test_status_wins_over_all(self, tmp_path):
+        """I1: `--all --status archived` returns only archived, not all goals."""
+        db_path = tmp_path / "todos.db"
+        _seed_goals(db_path, [
+            {"slug": "alive", "name": "Alive", "status": "active"},
+            {"slug": "dead", "name": "Dead", "status": "archived"},
+        ])
+        result = run_cli(
+            ["goal", "list", "--all", "--status", "archived"],
+            db_path=db_path, cwd=tmp_path,
+        )
+        assert result.returncode == 0
+        assert "dead" in result.stdout
+        assert "alive" not in result.stdout
 
     def test_json_output_shape(self, tmp_path):
         db_path = tmp_path / "todos.db"
@@ -1285,18 +1305,37 @@ class TestGoalUpdateCli:
         assert "delete" in result.stderr  # hint pointing to goal delete
 
     def test_update_noop_no_sync(self, tmp_path):
-        """Updating to the same status should not write index.md (idempotent reapply)."""
+        """Updating to the same status should not write index.md (idempotent reapply).
+
+        Uses mtime+size comparison: sync_index_md preserves arbitrary header
+        content, so a textual sentinel ("SENTINEL still in body") would pass
+        even if the sync fired. St_mtime_ns + st_size only stay put if no
+        write happened at all.
+        """
         db_path = tmp_path / "todos.db"
         _seed_goals(db_path, [{"slug": "x", "name": "X", "status": "active"}])
-        # Pre-create index.md with a sentinel; verify it is NOT touched on noop.
-        (tmp_path / "goals" / "index.md").write_text(
+        index_path = tmp_path / "goals" / "index.md"
+        # Pre-create index.md with a sentinel; capture its stat fingerprint.
+        index_path.write_text(
             "# SENTINEL — must remain unchanged\n", encoding="utf-8"
         )
+        before = index_path.stat()
         result = run_cli(["goal", "update", "x", "--status", "active"],
                          db_path=db_path, cwd=tmp_path)
         assert result.returncode == 0
-        index = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
-        assert "SENTINEL" in index  # untouched
+        after = index_path.stat()
+        assert (after.st_mtime_ns, after.st_size) == (
+            before.st_mtime_ns, before.st_size
+        ), "noop `goal update` must not re-render index.md"
+
+    def test_update_missing_exits_2(self, tmp_path):
+        """M4: updating a missing slug must exit 2 (no silent no-op)."""
+        db_path = tmp_path / "todos.db"
+        _init_db(db_path)
+        result = run_cli(["goal", "update", "nope", "--status", "paused"],
+                         db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 2
+        assert "nope" in result.stderr
 
     def test_update_invalid_status_rejected(self, tmp_path):
         db_path = tmp_path / "todos.db"
@@ -1321,20 +1360,31 @@ class TestGoalDeleteCli:
         assert (tmp_path / "goals" / "x" / "goal.md").exists()
 
     def test_delete_idempotent_no_sync(self, tmp_path):
+        """Second delete on an already-archived goal must not re-render index.md.
+
+        Uses mtime+size comparison: sync_index_md preserves arbitrary header
+        content, so a textual sentinel would survive a re-render and the
+        assertion would pass even if the sync fired. st_mtime_ns + st_size
+        only stay put if no write happened at all.
+        """
         db_path = tmp_path / "todos.db"
         _seed_goals(db_path, [{"slug": "x", "name": "X", "status": "active"}])
         # First delete archives
         r1 = run_cli(["goal", "delete", "x"], db_path=db_path, cwd=tmp_path)
         assert r1.returncode == 0
-        # Pre-write sentinel
-        (tmp_path / "goals" / "index.md").write_text(
+        index_path = tmp_path / "goals" / "index.md"
+        # Pre-write sentinel and capture its stat fingerprint.
+        index_path.write_text(
             "# SENTINEL — second delete must not touch this\n", encoding="utf-8"
         )
+        before = index_path.stat()
         # Second delete: already archived, no-op, no sync
         r2 = run_cli(["goal", "delete", "x"], db_path=db_path, cwd=tmp_path)
         assert r2.returncode == 0
-        index = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
-        assert "SENTINEL" in index
+        after = index_path.stat()
+        assert (after.st_mtime_ns, after.st_size) == (
+            before.st_mtime_ns, before.st_size
+        ), "noop `goal delete` must not re-render index.md"
 
     def test_delete_missing_exits_2(self, tmp_path):
         db_path = tmp_path / "todos.db"
@@ -1443,6 +1493,18 @@ class TestTaskListCli:
         assert result.returncode == 0
         assert "g1-T003" in result.stdout
         assert "g1-T001" not in result.stdout
+
+    def test_status_wins_over_all(self, tmp_path):
+        """I1: `--all --status archived` returns only archived tasks, not all."""
+        db_path = self._seed(tmp_path)
+        result = run_cli(
+            ["task", "list", "--all", "--status", "archived"],
+            db_path=db_path, cwd=tmp_path,
+        )
+        assert result.returncode == 0
+        assert "g1-T003" in result.stdout
+        assert "g1-T001" not in result.stdout
+        assert "g1-T002" not in result.stdout
 
     def test_json_output(self, tmp_path):
         db_path = self._seed(tmp_path)
