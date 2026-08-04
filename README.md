@@ -100,6 +100,34 @@ python scripts/cli.py sync-md --json
 # Auto-fires after goal add / task add / task update — no need to run manually.
 ```
 
+```bash
+# List goals (default hides archived)
+python scripts/cli.py goal list
+python scripts/cli.py goal list --all
+python scripts/cli.py goal list --status archived
+python scripts/cli.py goal list --json
+
+# Show one goal
+python scripts/cli.py goal show example-goal
+python scripts/cli.py goal show example-goal --json
+
+# Change a goal's status (use 'paused' / 'completed'; not 'archived')
+python scripts/cli.py goal update example-goal --status paused
+python scripts/cli.py goal update example-goal --status completed --json
+
+# Soft-delete (archive) and restore
+python scripts/cli.py goal delete example-goal
+python scripts/cli.py goal restore example-goal
+
+# Same surface for tasks
+python scripts/cli.py task list
+python scripts/cli.py task list --goal example-goal
+python scripts/cli.py task list --status done --all
+python scripts/cli.py task show example-goal-T001
+python scripts/cli.py task delete example-goal-T001
+python scripts/cli.py task restore example-goal-T001
+```
+
 Exit codes: `0` success, `1` input error, `2` database not initialized,
 `3` resource not found.
 
