@@ -23,14 +23,15 @@ These constraints are copied verbatim from the spec and apply to every task.
 | No-side-effects-before-apply | All reads must succeed before any `cc_timers.add` / `.del` is called | Spec §5.4 |
 | Time window | Today only, future slots only | Spec §2, §4.1 |
 | Own vs foreign timers | `description.startswith("Todo scheduler: ")` is "ours"; everything else is foreign and untouched | Spec §4.2 |
-| Matching key for diff | `slot_start` only | Spec §4.3 |
+| Matching key for diff | `(slot_start, task_id)` tuple. `task_id` is parsed from the description's `- <task_id>` suffix; descriptions without the suffix are legacy (parsed `slot_start`, `task_id=None`) and excluded from the diff. | Spec §4.3 |
+| Description format | `Todo scheduler: <date> <HH:MM> <label> - <task_id>` | Spec §4.5 |
 | Apply order | Removals first, then adds | Spec §4.3 |
 | Test backend env var | `TODO_TEST_TIMER_FILE` points at a JSON file representing cc-connect's state | Spec §6 |
 | Time mocking | `freezegun.freeze_time(...)` per test | Spec §6 |
 | New Python dependency | `freezegun` (dev only) | Spec §6, §7 |
 | Existing files NOT modified | `db.py`, `scheduler.py`, `format_utils.py`, `reminder.py`, `migrate.py`, `config/schedule.json`, `data/schema.sql` | Spec §3, §7 |
 | Per-slot reminder flow | Unchanged — Claude session still walks 6 steps on each timer fire | Spec §1, §7 |
-| Test count target | 93 prior + ~15 new = ~108 | Spec §8.11 |
+| Test count target | 93 prior + ~19 new = ~112 | Spec §8.11 |
 | Plan file location | `docs/superpowers/plans/2026-08-04-reminder-chain-automation.md` | skill default |
 
 ---
@@ -58,14 +59,13 @@ Each task below produces a self-contained, independently testable change. The di
 - Create: `scripts/cc_timers.py`
 - (No new test file. This task is verified manually + by the integration tests in Task 3.)
 
-**Interfaces:**
-- Consumes: nothing (library module; reads `os.environ["TODO_TEST_TIMER_FILE"]` internally)
-- Produces:
-  - `TEST_TIMER_FILE_ENV: str` — the env var name (`"TODO_TEST_TIMER_FILE"`)
-  - `list_all() -> list[dict]` — every timer in cc-connect; each item is `{"id": str, "fire_at": str, "description": str}`
-  - `add(prompt: str, fire_at_iso: str) -> dict` — add a timer; returns the created timer dict (id, fire_at, description)
-  - `delete(timer_id: str) -> None` — remove a timer by id
-  - `list_today_remaining(today: str) -> tuple[list[dict], list[dict]]` — returns `(own, foreign)` where `own` are timers with description starting with `"Todo scheduler: "` that fire today in the future, and `foreign` is everything else matching the date/filter
+**Interfaces (this task produces):**
+
+- `TEST_TIMER_FILE_ENV: str` — env var name (`"TODO_TEST_TIMER_FILE"`)
+- `list_all() -> list[dict]` — every timer in cc-connect; each item is `{"id": str, "fire_at": str, "description": str}`
+- `add(prompt: str, fire_at_iso: str, description: str | None = None) -> dict` — add a timer. If `description` is `None`, the test backend derives it from the prompt's first line (existing behavior). If `description` is given, that exact string is stored. The production backend always uses the explicit `description` (passed via `--desc`).
+- `delete(timer_id: str) -> None` — remove a timer by id
+- `list_today_remaining(today: str) -> tuple[list[dict], list[dict]]` — returns `(own, foreign)` where `own` are timers with description starting with `"Todo scheduler: "` that fire today in the future, and `foreign` is everything else matching the date/filter
 
 **Backend dispatch (single rule):** if `os.environ.get(TEST_TIMER_FILE_ENV)` is set and non-empty, use the file backend; otherwise use the subprocess backend. The file backend reads/writes a JSON array at the env-var path. Production code never sets the env var, so production always hits the subprocess backend.
 
@@ -161,18 +161,24 @@ def _list_all_via_subprocess() -> list[dict]:
 
 # ---- add ----
 
-def add(prompt: str, fire_at_iso: str) -> dict:
+def add(prompt: str, fire_at_iso: str, description: str | None = None) -> dict:
     """Create a new timer. Returns the created timer dict.
 
-    Production: `cc-connect timer add --at <iso> --prompt <text>`.
+    If `description` is None (default), the test backend derives it from
+    the prompt's first line via `_description_from_prompt` (existing
+    behavior, used by ad-hoc callers). Production callers should always
+    pass an explicit `description` (e.g., the one `build_slot_description`
+    produces) so the value matches what `rebuild-timers` will later parse.
+
+    Production: `cc-connect timer add --at <iso> --prompt <text> --desc <text>`.
     Test: append a new entry to the JSON file with a generated id.
     """
     if _use_file_backend():
-        return _add_to_file(prompt, fire_at_iso)
-    return _add_via_subprocess(prompt, fire_at_iso)
+        return _add_to_file(prompt, fire_at_iso, description)
+    return _add_via_subprocess(prompt, fire_at_iso, description)
 
 
-def _add_to_file(prompt: str, fire_at_iso: str) -> dict:
+def _add_to_file(prompt: str, fire_at_iso: str, description: str | None) -> dict:
     """Append a timer to the test JSON file. Id is auto-incremented."""
     path = _test_file_path()
     timers = list_all()  # reads from the same file via the file backend
@@ -188,9 +194,8 @@ def _add_to_file(prompt: str, fire_at_iso: str) -> dict:
             except ValueError:
                 pass
     # The "description" we store mirrors what production cc-connect shows.
-    # The first line of the prompt template is the user-facing title; we
-    # synthesize a stable description here.
-    description = _description_from_prompt(prompt, fire_at_iso)
+    if description is None:
+        description = _description_from_prompt(prompt)
     entry = {
         "id": f"test-{next_n:04d}",
         "fire_at": fire_at_iso,
@@ -204,7 +209,7 @@ def _add_to_file(prompt: str, fire_at_iso: str) -> dict:
     return entry
 
 
-def _description_from_prompt(prompt: str, fire_at_iso: str) -> str:
+def _description_from_prompt(prompt: str) -> str:
     """Derive a short description for the timer entry.
 
     The production cron historically uses the first line of the prompt
@@ -217,12 +222,14 @@ def _description_from_prompt(prompt: str, fire_at_iso: str) -> str:
     return f"Todo scheduler: {first_line}".strip()
 
 
-def _add_via_subprocess(prompt: str, fire_at_iso: str) -> dict:
+def _add_via_subprocess(
+    prompt: str, fire_at_iso: str, description: str | None,
+) -> dict:
     """Add via cc-connect, then re-list to find the new entry."""
-    subprocess.run(
-        ["cc-connect", "timer", "add", "--at", fire_at_iso, "--prompt", prompt],
-        capture_output=True, text=True, check=True,
-    )
+    cmd = ["cc-connect", "timer", "add", "--at", fire_at_iso, "--prompt", prompt]
+    if description is not None:
+        cmd += ["--desc", description]
+    subprocess.run(cmd, capture_output=True, text=True, check=True)
     # Re-list to discover the new id (cc-connect's `add` output is
     # implementation-defined; listing is the canonical source).
     target_time = fire_at_iso
@@ -230,7 +237,7 @@ def _add_via_subprocess(prompt: str, fire_at_iso: str) -> dict:
         if t["fire_at"] == target_time:
             return t
     # If the new entry doesn't appear yet, return a synthetic placeholder.
-    return {"id": "", "fire_at": fire_at_iso, "description": ""}
+    return {"id": "", "fire_at": fire_at_iso, "description": description or ""}
 
 
 # ---- delete ----
@@ -363,14 +370,16 @@ Dual-backend wrapper for cc-connect timer list/add/del:
 
 - `reconcile_timers(planned: list[dict], actual: list[dict]) -> dict`
   - `planned`: items have keys `slot_start`, `slot_end`, `slot_label`, `task_id`, `goal_slug`
-  - `actual`: items have keys `id`, `fire_at`, `description`, `slot_start` (slot_start is the parsed `HH:MM` from the description, or `None` for foreign timers; we filter those out before matching)
-  - Returns `{"to_add": [planned entries whose slot_start is not in actual], "to_remove": [actual entries whose slot_start is not in planned]}`
+  - `actual`: items have keys `id`, `fire_at`, `description`, `slot_start`, `task_id` (both parsed from the description; foreign or legacy timers have `slot_start` set and `task_id` set to `None`, and are excluded from the diff)
+  - Returns `{"to_add": [planned entries whose (slot_start, task_id) is not in actual], "to_remove": [actual entries whose (slot_start, task_id) is not in planned]}`
 - `parse_slot_start_from_description(description: str) -> str | None`
   - Returns `"HH:MM"` if description matches `"Todo scheduler: <date> <HH:MM> ..."`, else `None`
-- `build_slot_description(date: str, slot_start: str, slot_label: str) -> str`
-  - Returns `"Todo scheduler: <date> <HH:MM> <label>"`
-- `build_slot_prompt(date: str, slot_start: str, slot_end: str, slot_label: str) -> str`
-  - Returns the multi-line natural-language prompt that the timer fires with.
+- `parse_task_id_from_description(description: str) -> str | None`
+  - Returns `"<slug>-T<digits>"` if description ends with ` - <task_id>`, else `None` (covers legacy timers and foreign entries)
+- `build_slot_description(date: str, slot_start: str, slot_label: str, task_id: str) -> str`
+  - Returns `"Todo scheduler: <date> <HH:MM> <label> - <task_id>"`
+- `build_slot_prompt(date: str, slot_start: str, slot_end: str, slot_label: str, task_id: str) -> str`
+  - Returns the multi-line natural-language prompt that the timer fires with. `task_id` is embedded in the first line so `parse_task_id_from_description` can recover it.
 
 - [ ] **Step 1: Add a small helper at the top of `tests/test_cli.py` to load `cli` as an importable module**
 
@@ -396,7 +405,11 @@ Append the following to the end of `tests/test_cli.py`:
 # -------------------- rebuild-timers: pure helpers --------------------
 
 class TestReconcileTimers:
-    """Direct unit tests for scripts.cli.reconcile_timers."""
+    """Direct unit tests for scripts.cli.reconcile_timers.
+
+    All actual items below include both slot_start and task_id, which is
+    the format that production timers will have after Item 2 ships.
+    """
 
     def test_reconcile_empty_inputs(self):
         from cli import reconcile_timers
@@ -406,9 +419,9 @@ class TestReconcileTimers:
         from cli import reconcile_timers
         planned = [
             {"slot_start": "12:00", "slot_end": "13:00", "slot_label": "lunch",
-             "task_id": "T001", "goal_slug": "g1"},
+             "task_id": "g1-T001", "goal_slug": "g1"},
             {"slot_start": "18:00", "slot_end": "19:00", "slot_label": "evening",
-             "task_id": "T002", "goal_slug": "g1"},
+             "task_id": "g1-T002", "goal_slug": "g1"},
         ]
         result = reconcile_timers(planned, [])
         assert len(result["to_add"]) == 2
@@ -419,11 +432,11 @@ class TestReconcileTimers:
         from cli import reconcile_timers
         actual = [
             {"id": "a", "fire_at": "2026-08-04T12:00:00+08:00",
-             "description": "Todo scheduler: 2026-08-04 12:00 lunch",
-             "slot_start": "12:00"},
+             "description": "Todo scheduler: 2026-08-04 12:00 lunch - g1-T001",
+             "slot_start": "12:00", "task_id": "g1-T001"},
             {"id": "b", "fire_at": "2026-08-04T18:00:00+08:00",
-             "description": "Todo scheduler: 2026-08-04 18:00 evening",
-             "slot_start": "18:00"},
+             "description": "Todo scheduler: 2026-08-04 18:00 evening - g1-T002",
+             "slot_start": "18:00", "task_id": "g1-T002"},
         ]
         result = reconcile_timers([], actual)
         assert result["to_add"] == []
@@ -434,12 +447,12 @@ class TestReconcileTimers:
         from cli import reconcile_timers
         planned = [
             {"slot_start": "12:00", "slot_end": "13:00", "slot_label": "lunch",
-             "task_id": "T001", "goal_slug": "g1"},
+             "task_id": "g1-T001", "goal_slug": "g1"},
         ]
         actual = [
             {"id": "x", "fire_at": "2026-08-04T12:00:00+08:00",
-             "description": "Todo scheduler: 2026-08-04 12:00 lunch",
-             "slot_start": "12:00"},
+             "description": "Todo scheduler: 2026-08-04 12:00 lunch - g1-T001",
+             "slot_start": "12:00", "task_id": "g1-T001"},
         ]
         result = reconcile_timers(planned, actual)
         assert result["to_add"] == []
@@ -447,10 +460,11 @@ class TestReconcileTimers:
 
     def test_reconcile_ignores_foreign_actual(self):
         from cli import reconcile_timers
-        # Foreign timer (no slot_start) must not appear in to_remove
+        # Foreign timer: no slot_start, no task_id — both must be ignored.
         actual = [
             {"id": "f", "fire_at": "2026-08-04T20:00:00+08:00",
-             "description": "User manual reminder", "slot_start": None},
+             "description": "User manual reminder",
+             "slot_start": None, "task_id": None},
         ]
         result = reconcile_timers([], actual)
         assert result["to_remove"] == []
@@ -462,46 +476,124 @@ class TestReconcileTimers:
         result = reconcile_timers([], actual)
         assert result["to_remove"] == []
 
+    def test_reconcile_same_slot_different_task_is_stale(self):
+        """A planned slot filled by a different task is a stale timer.
+        Both the old (actual) and the new (planned) entries must appear
+        in the diff so the old one is removed and the new one is added.
+        """
+        from cli import reconcile_timers
+        planned = [
+            {"slot_start": "18:00", "slot_end": "19:00", "slot_label": "evening",
+             "task_id": "g1-T002", "goal_slug": "g1"},
+        ]
+        actual = [
+            {"id": "old-18", "fire_at": "2026-08-04T18:00:00+08:00",
+             "description": "Todo scheduler: 2026-08-04 18:00 evening - g1-T001",
+             "slot_start": "18:00", "task_id": "g1-T001"},
+        ]
+        result = reconcile_timers(planned, actual)
+        assert len(result["to_add"]) == 1
+        assert result["to_add"][0]["task_id"] == "g1-T002"
+        assert len(result["to_remove"]) == 1
+        assert result["to_remove"][0]["id"] == "old-18"
+
+    def test_reconcile_ignores_legacy_timer_without_task_id(self):
+        """Pre-Item-2 timers (description without '- <task_id>') parse
+        slot_start but not task_id. They are excluded from the diff
+        entirely (neither kept nor removed by the algorithm; the caller
+        keeps them in cc-connect until they fire naturally)."""
+        from cli import reconcile_timers
+        planned = [
+            {"slot_start": "12:00", "slot_end": "13:00", "slot_label": "lunch",
+             "task_id": "g1-T001", "goal_slug": "g1"},
+        ]
+        actual = [
+            # Legacy timer: description has slot_start but no task_id.
+            # The caller would have built this with
+            # slot_start="12:00", task_id=None (parse_task_id_from_description
+            # returned None).
+            {"id": "legacy-12", "fire_at": "2026-08-04T12:00:00+08:00",
+             "description": "Todo scheduler: 2026-08-04 12:00 lunch",
+             "slot_start": "12:00", "task_id": None},
+        ]
+        result = reconcile_timers(planned, actual)
+        # The legacy timer is NOT in to_remove (algorithm ignores it).
+        assert result["to_remove"] == []
+        # The planned entry is in to_add — the new timer will be added
+        # and the legacy timer will be left alone (a deliberate v1
+        # trade-off; a future enhancement could remove legacy timers
+        # whose slot is now filled by a different task).
+        assert len(result["to_add"]) == 1
+        assert result["to_add"][0]["task_id"] == "g1-T001"
+
 
 class TestSlotPromptHelpers:
     """Unit tests for parse_slot_start_from_description,
-    build_slot_description, build_slot_prompt."""
+    parse_task_id_from_description, build_slot_description,
+    build_slot_prompt."""
 
     def test_parse_slot_start_from_description_our_format(self):
         from cli import parse_slot_start_from_description
         assert parse_slot_start_from_description(
-            "Todo scheduler: 2026-08-04 12:00 lunch"
+            "Todo scheduler: 2026-08-04 12:00 lunch - g1-T001"
         ) == "12:00"
         assert parse_slot_start_from_description(
-            "Todo scheduler: 2026-08-04 18:00 evening"
+            "Todo scheduler: 2026-08-04 18:00 evening - g1-T002"
         ) == "18:00"
+        # Legacy format (no task_id) also works.
+        assert parse_slot_start_from_description(
+            "Todo scheduler: 2026-08-04 12:00 lunch"
+        ) == "12:00"
 
     def test_parse_slot_start_from_description_foreign_returns_none(self):
         from cli import parse_slot_start_from_description
         assert parse_slot_start_from_description("User manual reminder") is None
         assert parse_slot_start_from_description("") is None
         assert parse_slot_start_from_description(
-            "Todo scheduler: not-a-date 12:00 lunch"
+            "Todo scheduler: not-a-date 12:00 lunch - g1-T001"
         ) is None
+
+    def test_parse_task_id_from_description_our_format(self):
+        from cli import parse_task_id_from_description
+        assert parse_task_id_from_description(
+            "Todo scheduler: 2026-08-04 12:00 lunch - g1-T001"
+        ) == "g1-T001"
+        assert parse_task_id_from_description(
+            "Todo scheduler: 2026-08-04 18:00 evening - g1-T002"
+        ) == "g1-T002"
+
+    def test_parse_task_id_from_description_legacy_returns_none(self):
+        from cli import parse_task_id_from_description
+        # Legacy format (no '- <task_id>' suffix) returns None.
+        assert parse_task_id_from_description(
+            "Todo scheduler: 2026-08-04 12:00 lunch"
+        ) is None
+        assert parse_task_id_from_description("User manual reminder") is None
+        assert parse_task_id_from_description("") is None
 
     def test_build_slot_description(self):
         from cli import build_slot_description
-        assert build_slot_description("2026-08-04", "12:00", "lunch") == (
-            "Todo scheduler: 2026-08-04 12:00 lunch"
-        )
+        assert build_slot_description(
+            "2026-08-04", "12:00", "lunch", "g1-T001"
+        ) == "Todo scheduler: 2026-08-04 12:00 lunch - g1-T001"
 
     def test_build_slot_prompt_contains_key_fields(self):
         from cli import build_slot_prompt
-        prompt = build_slot_prompt("2026-08-04", "12:00", "13:00", "lunch")
+        prompt = build_slot_prompt(
+            "2026-08-04", "12:00", "13:00", "lunch", "g1-T001"
+        )
         assert "2026-08-04" in prompt
         assert "12:00" in prompt
         assert "13:00" in prompt
         assert "lunch" in prompt
+        assert "g1-T001" in prompt
         assert "Feishu" in prompt
         assert "reminder" in prompt.lower()
         # First line is the user-facing title (used by cc_timers to derive
-        # the stored description).
+        # the stored description when no --desc is passed).
         assert prompt.splitlines()[0].startswith("Free slot 启动")
+        # First line includes the task_id (parseable by parse_task_id_from_description).
+        assert "g1-T001" in prompt.splitlines()[0]
 ```
 
 - [ ] **Step 3: Run the new tests; expect failures**
@@ -518,44 +610,69 @@ Append the following code to the end of `scripts/cli.py` (just before the `if __
 
 import re as _re_rebuild  # local alias to keep the global imports untouched
 
-_OWN_DESC_RE = _re_rebuild.compile(
-    r"^Todo scheduler: \d{4}-\d{2}-\d{2} (\d{2}:\d{2}) "
+_OWN_DESC_SLOT_RE = _re_rebuild.compile(
+    r"^Todo scheduler: \d{4}-\d{2}-\d{2} (\d{2}:\d{2})"
+)
+_OWN_DESC_TASK_RE = _re_rebuild.compile(
+    r" - ([a-z0-9][a-z0-9-]{0,62}-T\d{3,})$"
 )
 
 
 def parse_slot_start_from_description(description: str) -> str | None:
-    """Extract 'HH:MM' from a 'Todo scheduler: <date> <HH:MM> <label>' description.
+    """Extract 'HH:MM' from a 'Todo scheduler: <date> <HH:MM> <label> [- <task_id>]' description.
 
     Returns None if the description is not in our format (e.g., foreign timers
     or empty input). This is the only place that knows the description format.
     """
     if not description:
         return None
-    m = _OWN_DESC_RE.match(description)
+    m = _OWN_DESC_SLOT_RE.match(description)
     return m.group(1) if m else None
 
 
-def build_slot_description(date: str, slot_start: str, slot_label: str) -> str:
+def parse_task_id_from_description(description: str) -> str | None:
+    """Extract the task_id from the '- <task_id>' suffix of our own descriptions.
+
+    Returns None if the description is missing the suffix (legacy timers or
+    foreign entries). The matching shape is `<slug>-T<digits>` to stay
+    consistent with task_add's validation.
+    """
+    if not description:
+        return None
+    m = _OWN_DESC_TASK_RE.search(description)
+    return m.group(1) if m else None
+
+
+def build_slot_description(
+    date: str, slot_start: str, slot_label: str, task_id: str,
+) -> str:
     """Build the cc-connect timer description for a slot we own.
 
-    Format: 'Todo scheduler: <date> <HH:MM> <label>'. parse_slot_start_from_description
-    must be able to recover slot_start from this string.
+    Format: 'Todo scheduler: <date> <HH:MM> <label> - <task_id>'.
+    parse_slot_start_from_description must be able to recover slot_start from
+    this string; parse_task_id_from_description must be able to recover task_id.
     """
-    return f"Todo scheduler: {date} {slot_start} {slot_label}"
+    return f"Todo scheduler: {date} {slot_start} {slot_label} - {task_id}"
 
 
 def build_slot_prompt(
-    date: str, slot_start: str, slot_end: str, slot_label: str,
+    date: str, slot_start: str, slot_end: str, slot_label: str, task_id: str,
 ) -> str:
     """Build the natural-language prompt that a per-slot timer fires with.
 
     This is the same template the morning cron's per-slot prompt uses today
-    (see the spec's §4.5). The first line is the user-facing title; the
-    remaining lines walk Claude through the 6-step reminder flow.
+    (see the spec's §4.5). The first line is the user-facing title and embeds
+    the task_id so parse_task_id_from_description can recover it from the
+    description. The remaining lines walk Claude through the 6-step reminder
+    flow.
     """
-    repo_root = str(SCRIPTS_DIR.parent)
+    # Use forward slashes regardless of OS — the prompt is interpreted by
+    # bash on the cron side, and the morning cron's existing prompt uses
+    # forward slashes too.
+    repo_root = SCRIPTS_DIR.parent.as_posix()
     return (
-        f"Free slot 启动: {date} {slot_start} {slot_label} ({slot_start}-{slot_end}).\n"
+        f"Free slot 启动: {date} {slot_start} {slot_label} "
+        f"({slot_start}-{slot_end}) - {task_id}.\n"
         "\n"
         "Send a Feishu reminder for the next pending task. Steps:\n"
         f"1. cd to {repo_root}\n"
@@ -577,24 +694,38 @@ def build_slot_prompt(
 
 
 def reconcile_timers(planned: list[dict], actual: list[dict]) -> dict:
-    """Diff planned vs actual timer sets by slot_start.
+    """Diff planned vs actual timer sets by (slot_start, task_id) tuple.
 
     planned: [{'slot_start', 'slot_end', 'slot_label', 'task_id', 'goal_slug'}, ...]
-    actual:  [{'id', 'fire_at', 'description', 'slot_start'}, ...]
-        (slot_start is the parsed HH:MM from description, or None for foreign)
+    actual:  [{'id', 'fire_at', 'description', 'slot_start', 'task_id'}, ...]
+        (slot_start and task_id are parsed from the description;
+         legacy timers and foreign timers have task_id=None and are excluded)
 
-    Returns {'to_add': [planned entries without a match in actual],
-             'to_remove': [actual entries without a match in planned]}.
+    Returns {'to_add': [planned entries without a (slot_start, task_id) match in actual],
+             'to_remove': [actual entries without a (slot_start, task_id) match in planned]}.
 
-    Foreign actual entries (slot_start is None) are ignored — the caller is
-    expected to keep them. Past actual entries are not the concern of this
-    function; callers should pre-filter via cc_timers.list_today_remaining.
+    Actual entries with task_id=None are ignored — neither kept nor removed.
+    Past actual entries are not the concern of this function; callers should
+    pre-filter via cc_timers.list_today_remaining.
     """
-    planned_keys = {p["slot_start"] for p in planned}
-    actual_keys = {a["slot_start"] for a in actual if a.get("slot_start") is not None}
-    to_add = [p for p in planned if p["slot_start"] not in actual_keys]
-    to_remove = [a for a in actual if a.get("slot_start") is not None
-                 and a["slot_start"] not in planned_keys]
+    planned_keys = {
+        (p["slot_start"], p["task_id"])
+        for p in planned
+    }
+    actual_keys = {
+        (a["slot_start"], a["task_id"])
+        for a in actual
+        if a.get("slot_start") is not None and a.get("task_id") is not None
+    }
+    to_add = [
+        p for p in planned
+        if (p["slot_start"], p["task_id"]) not in actual_keys
+    ]
+    to_remove = [
+        a for a in actual
+        if a.get("slot_start") is not None and a.get("task_id") is not None
+        and (a["slot_start"], a["task_id"]) not in planned_keys
+    ]
     return {"to_add": to_add, "to_remove": to_remove}
 
 
@@ -662,12 +793,12 @@ or as a single JSON object when --json is set.
 - [ ] **Step 5: Run the new tests; expect passes**
 
 Run: `cd "D:/codeSpace/claudecode/stock_data/todos" && python -m pytest tests/test_cli.py::TestReconcileTimers tests/test_cli.py::TestSlotPromptHelpers -v`
-Expected: 10/10 passing (6 reconcile + 4 prompt helpers).
+Expected: 14/14 passing (8 reconcile + 6 prompt helpers).
 
-- [ ] **Step 6: Run the full suite; expect 103/103 passing**
+- [ ] **Step 6: Run the full suite; expect 107/107 passing**
 
 Run: `cd "D:/codeSpace/claudecode/stock_data/todos" && python -m pytest -q`
-Expected: 103/103 passing (93 prior + 10 new pure-helper tests). The 9 rebuild-timers integration tests are still pending in Task 3.
+Expected: 107/107 passing (93 prior + 14 new pure-helper tests). The 9 rebuild-timers integration tests are still pending in Task 3.
 
 - [ ] **Step 7: Commit**
 
@@ -684,7 +815,7 @@ scripts/cli.py gains module-level functions:
   we hand to cc-connect when adding a new timer
 - format_rebuild_summary: render the human-readable output
 
-10 new unit tests in tests/test_cli.py (TestReconcileTimers +
+14 new unit tests in tests/test_cli.py (TestReconcileTimers +
 TestSlotPromptHelpers) cover the diff edge cases and the prompt
 template stability. Integration tests for the full CLI flow are
 in the next commit.
@@ -717,37 +848,50 @@ Also bumps the top-of-file docstring to mention 'rebuild-timers'.
 2. focus = db.get_today_focus()
    if focus is None: render "no focus set" summary, return 0
 3. all_slots = scheduler.get_slots_for_date(today)  # 4 weekday or 3 weekend
-4. planned = []
-   prev_end = "00:00"
-   for slot in all_slots:
-       if slot["start"] <= now_hhmm:           # past
-           prev_end = slot["end"]
+4. plan = scheduler.compute_schedule(
+        focus, today, "00:00", max_slots=len(all_slots),
+   )
+   slots_by_start = {s["start"]: s for s in all_slots}
+   planned = []
+   for entry in plan:
+       if entry["slot_start"] <= now_hhmm:   # past
            continue
-       plan_one = scheduler.compute_schedule(focus, today, prev_end, max_slots=1)
-       prev_end = slot["end"]
-       if not plan_one: continue
-       if plan_one[0]["slot_start"] != slot["start"]: continue  # overflowed
+       slot = slots_by_start.get(entry["slot_start"])
+       if slot is None:                      # safety; should not happen
+           continue
        planned.append({
            "date": today,
-           "slot_start": plan_one[0]["slot_start"],
-           "slot_end": plan_one[0]["slot_end"],
+           "slot_start": entry["slot_start"],
+           "slot_end": entry["slot_end"],
            "slot_label": slot["label"],
-           "task_id": plan_one[0]["task_id"],
-           "goal_slug": plan_one[0]["goal_slug"],
+           "task_id": entry["task_id"],
+           "goal_slug": entry["goal_slug"],
        })
 5. own, foreign = cc_timers.list_today_remaining(today)
-   actual = [{**t, "slot_start": parse_slot_start_from_description(t["description"])}
-             for t in own]
+   actual = []
+   for t in own:
+       actual.append({
+           **t,
+           "slot_start": parse_slot_start_from_description(t["description"]),
+           "task_id": parse_task_id_from_description(t["description"]),
+       })
 6. diff = reconcile_timers(planned, actual)
 7. for t in diff["to_remove"]:
        cc_timers.delete(t["id"])
    for p in diff["to_add"]:
-       prompt = build_slot_prompt(p["date"], p["slot_start"], p["slot_end"], p["slot_label"])
+       prompt = build_slot_prompt(
+           p["date"], p["slot_start"], p["slot_end"],
+           p["slot_label"], p["task_id"],
+       )
        fire_at = f"{p['date']}T{p['slot_start']}:00+08:00"   # Asia/Shanghai hard-coded
-       cc_timers.add(prompt, fire_at)
-8. kept = [a for a in actual if a not in [r for r in diff["to_remove"]]]
+       cc_timers.add(prompt, fire_at, description=build_slot_description(
+           p["date"], p["slot_start"], p["slot_label"], p["task_id"],
+       ))
+8. kept = [a for a in actual if a not in diff["to_remove"]]
 9. render (human or JSON) and return 0
 ```
+
+**Why a single `compute_schedule(max_slots=len(slots))` call:** `compute_schedule` keeps a local `used_task_ids` set per invocation (see `scripts/scheduler.py`). Calling it once per slot with `max_slots=1` would re-pick the same first pending task for every slot, putting the same task into every timer. One call with `max_slots=len(slots)` lets the scheduler hand out distinct tasks across all of today's slots; we then filter past slot_starts.
 
 **Why hardcode `+08:00` for `fire_at`:** the spec and the existing cron's timer list output both use Asia/Shanghai timestamps. v1 does not introduce timezone configuration; if the user moves timezones, that's a future enhancement.
 
@@ -815,18 +959,23 @@ import freezegun
 
 
 def _seed_focus_and_tasks(db_path: Path) -> None:
-    """Insert one active goal with 3 pending tasks so scheduler has work to do."""
+    """Insert one active goal with 4 pending tasks so scheduler has work to do.
+
+    4 tasks because a weekday has 4 slots (07:30, 12:00, 18:00, 21:00); with
+    3 tasks the morning 5am test would only get 3 timers, not 4.
+    """
     with sqlite3.connect(str(db_path)) as conn:
         conn.execute(
             "INSERT INTO goals (slug, name, description, status, "
             "total_tasks, completed_tasks, created_at, updated_at) "
-            "VALUES ('g1', 'Goal One', '', 'active', 3, 0, "
+            "VALUES ('g1', 'Goal One', '', 'active', 4, 0, "
             "'2026-08-04T00:00:00', '2026-08-04T00:00:00')"
         )
         for seq, title, hours in [
             (1, "task one", 1.0),
             (2, "task two", 1.0),
             (3, "task three", 1.0),
+            (4, "task four", 1.0),
         ]:
             tid = f"g1-T{seq:03d}"
             conn.execute(
@@ -971,25 +1120,27 @@ class TestRebuildTimers:
 
     @freezegun.freeze_time("2026-08-04 14:00:00")
     def test_rebuild_timers_stale_timer_removed(self, tmp_path):
-        """If the timer file already has a 18:00 timer for an old task (T001)
-        and the DB's 18:00 plan now resolves to T002, the old timer is removed
+        """If the timer file already has a 18:00 timer for an old task (T099)
+        and the DB's 18:00 plan now resolves to T001, the old timer is removed
         and a new one is added."""
         db_path = tmp_path / "db.sqlite"
         _init_db(db_path)
         _seed_focus_and_tasks(db_path)
         timer_file = tmp_path / "timers.json"
-        # Pre-seed: 18:00 timer for old task, plus 21:00 timer that's still valid.
-        # Both must have descriptions in our format so the diff recognizes them.
+        # Pre-seed: 18:00 timer for stale task T099, plus 21:00 timer for T002
+        # (still matches the planner's choice for 21:00 at 14pm). Both must
+        # have task_id-encoded descriptions so the (slot_start, task_id) diff
+        # recognizes them.
         timer_file.write_text(json.dumps([
             {
                 "id": "test-old-18",
                 "fire_at": "2026-08-04T18:00:00+08:00",
-                "description": "Todo scheduler: 2026-08-04 18:00 evening",
+                "description": "Todo scheduler: 2026-08-04 18:00 evening - g1-T099",
             },
             {
                 "id": "test-21",
                 "fire_at": "2026-08-04T21:00:00+08:00",
-                "description": "Todo scheduler: 2026-08-04 21:00 night",
+                "description": "Todo scheduler: 2026-08-04 21:00 night - g1-T002",
             },
         ], ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -997,13 +1148,14 @@ class TestRebuildTimers:
 
         assert result.returncode == 0, result.stderr
         timers = json.loads(timer_file.read_text(encoding="utf-8"))
-        # 21:00 was kept (slot_start still in plan). 18:00 was removed and re-added
-        # with a new id; the test-old-18 id should be gone.
+        # 21:00 was kept (slot_start + task_id T002 still in plan). 18:00 was
+        # removed (stale T099) and re-added with a new id for T001; the
+        # test-old-18 id should be gone.
         ids = {t["id"] for t in timers}
         assert "test-old-18" not in ids
         # 21:00 still present
         assert "test-21" in ids
-        # 18:00 still present (just a different id)
+        # 18:00 still present (just a different id, now for T001)
         starts = sorted(t["fire_at"][11:16] for t in timers)
         assert starts == ["18:00", "21:00"]
         # Stdout reports 1 removed + 1 added
@@ -1084,39 +1236,30 @@ def subcommand_rebuild_timers(args, as_json: bool) -> int:
         return 0
 
     all_slots = scheduler.get_slots_for_date(today)
+    try:
+        # One call lets the scheduler hand out distinct tasks across all of
+        # today's slots (it keeps a local used_task_ids set per call).
+        plan = scheduler.compute_schedule(
+            focus, today, "00:00", max_slots=len(all_slots),
+        )
+    except Exception as exc:
+        _emit_error(f"Error: scheduler.compute_schedule failed: {exc}", code=2)
+
+    slots_by_start = {s["start"]: s for s in all_slots}
     planned: list[dict] = []
-    prev_end = "00:00"
-    for slot in all_slots:
-        if slot["start"] <= now_hhmm:
-            prev_end = slot["end"]
-            continue
-        try:
-            plan_one = scheduler.compute_schedule(
-                focus, today, prev_end, max_slots=1,
-            )
-        except Exception as exc:
-            # A scheduler failure on one slot must not abort the whole run.
-            prev_end = slot["end"]
-            print(
-                f"Warning: scheduler failed for slot {slot['start']}: {exc}",
-                file=sys.stderr,
-            )
-            continue
-        prev_end = slot["end"]
-        if not plan_one:
-            continue
-        if plan_one[0]["slot_start"] != slot["start"]:
-            # Task is too big for this slot (or the scheduler overflowed
-            # to a later slot). Skip — there's no point queuing a timer
-            # for a slot we can't fill.
-            continue
+    for entry in plan:
+        if entry["slot_start"] <= now_hhmm:
+            continue  # past slot
+        slot = slots_by_start.get(entry["slot_start"])
+        if slot is None:
+            continue  # safety; should not happen
         planned.append({
             "date": today,
-            "slot_start": plan_one[0]["slot_start"],
-            "slot_end": plan_one[0]["slot_end"],
+            "slot_start": entry["slot_start"],
+            "slot_end": entry["slot_end"],
             "slot_label": slot["label"],
-            "task_id": plan_one[0]["task_id"],
-            "goal_slug": plan_one[0]["goal_slug"],
+            "task_id": entry["task_id"],
+            "goal_slug": entry["goal_slug"],
         })
 
     if not planned:
@@ -1138,11 +1281,12 @@ def subcommand_rebuild_timers(args, as_json: bool) -> int:
         return 0
 
     own, foreign = cc_timers.list_today_remaining(today)
-    actual = []
+    actual: list[dict] = []
     for t in own:
         actual.append({
             **t,
             "slot_start": parse_slot_start_from_description(t["description"]),
+            "task_id": parse_task_id_from_description(t["description"]),
         })
 
     diff = reconcile_timers(planned, actual)
@@ -1161,10 +1305,14 @@ def subcommand_rebuild_timers(args, as_json: bool) -> int:
         try:
             prompt = build_slot_prompt(
                 entry["date"], entry["slot_start"], entry["slot_end"],
-                entry["slot_label"],
+                entry["slot_label"], entry["task_id"],
+            )
+            description = build_slot_description(
+                entry["date"], entry["slot_start"], entry["slot_label"],
+                entry["task_id"],
             )
             fire_at = f"{entry['date']}T{entry['slot_start']}:00+08:00"
-            cc_timers.add(prompt, fire_at)
+            cc_timers.add(prompt, fire_at, description=description)
         except Exception as exc:
             apply_failures.append(
                 f"failed to add {entry['slot_start']} ({entry.get('task_id')}): {exc}"
@@ -1195,11 +1343,13 @@ def subcommand_rebuild_timers(args, as_json: bool) -> int:
                 for p in diff["to_add"]
             ],
             "removed": [
-                {"id": r["id"], "slot_start": r.get("slot_start")}
+                {"id": r["id"], "slot_start": r.get("slot_start"),
+                 "task_id": r.get("task_id")}
                 for r in diff["to_remove"]
             ],
             "kept": [
-                {"id": k["id"], "slot_start": k.get("slot_start")}
+                {"id": k["id"], "slot_start": k.get("slot_start"),
+                 "task_id": k.get("task_id")}
                 for k in kept
             ],
             "ignored_foreign": [
@@ -1278,10 +1428,16 @@ cd "D:/codeSpace/claudecode/stock_data/todos"
 git add scripts/cli.py tests/test_cli.py requirements-dev.txt README.md
 git commit -m "Add rebuild-timers subcommand with integration tests
 
-The subcommand reads today's planned reminder slots via
-scheduler.compute_schedule (one slot at a time, independently), reads
-cc-connect's actual state via cc_timers.list_today_remaining, and
-applies the diff via cc_timers.delete + .add (removals first).
+The subcommand reads today's planned reminder slots via a single
+scheduler.compute_schedule call (max_slots=len(slots), then filter
+past slot_starts), reads cc-connect's actual state via
+cc_timers.list_today_remaining, and applies the diff via
+cc_timers.delete + .add (removals first).
+
+The diff matches by (slot_start, task_id) tuple. The task_id is
+encoded in the timer's description ('- <task_id>' suffix) and parsed
+back via parse_task_id_from_description. Legacy timers without the
+suffix are excluded from the diff entirely.
 
 Wires into the existing CLI infrastructure:
 - Reuses _require_initialized_db, _emit_error, --json flag, exit codes
@@ -1298,7 +1454,7 @@ New dev dependency: freezegun (for time-mocking integration tests).
 - No focus set → no timers
 - Late-night 22pm → no remaining slots
 - --json output is parseable
-- Stale timer removed + re-added
+- Stale timer (different task_id) removed + re-added
 - Foreign timers left alone
 
 Also adds requirements-dev.txt (one line: freezegun>=1.2) and
@@ -1323,9 +1479,19 @@ Expected output: a list of cron jobs. Look for the one with the schedule `5 0 * 
 
 If the daily cron is not yet registered (it might not be, on a fresh checkout), the implementer should pause and ask the user whether to add it now or skip this task.
 
-- [ ] **Step 2: Edit the cron's prompt to call `rebuild-timers`**
+- [ ] **Step 2: Show the new prompt to the user before editing**
 
-If the cron already exists (the usual case for this user):
+Before running `cron edit`, the implementer must **print the new prompt to the human partner's chat and wait for approval**. Do not auto-edit. The prompt to show is:
+
+```
+python scripts/cli.py rebuild-timers
+```
+
+Wait for the human partner to say "ok" / "approved" / equivalent before continuing to Step 3.
+
+- [ ] **Step 3: Edit the cron's prompt to call `rebuild-timers`**
+
+If the cron already exists (the usual case for this user) and the human partner has approved the new prompt in Step 2:
 
 ```bash
 cc-connect cron edit <job-id> prompt "python scripts/cli.py rebuild-timers"
@@ -1333,12 +1499,12 @@ cc-connect cron edit <job-id> prompt "python scripts/cli.py rebuild-timers"
 
 Substitute `<job-id>` for the id found in Step 1.
 
-- [ ] **Step 3: Verify the edit took effect**
+- [ ] **Step 4: Verify the edit took effect**
 
 Run: `cc-connect cron info <job-id>`
 Expected: the `prompt` field now shows `python scripts/cli.py rebuild-timers` (and no other field has changed). The `cron_expr` should still be `5 0 * * *`, and the `enabled` flag should still be true.
 
-- [ ] **Step 4: Manual smoke test**
+- [ ] **Step 5: Manual smoke test**
 
 Run the new subcommand directly to confirm end-to-end behavior:
 
@@ -1370,12 +1536,12 @@ The exact numbers depend on the live state. The smoke test passes as long as:
 - stdout is one of the documented summary shapes
 - `cc-connect timer list` after the smoke test shows a consistent timer set for today
 
-- [ ] **Step 5: Run the full test suite one last time**
+- [ ] **Step 6: Run the full test suite one last time**
 
 Run: `cd "D:/codeSpace/claudecode/stock_data/todos" && python -m pytest -q`
 Expected: 112/112 passing (no regressions from the cron change — the cron change is operational, not in the repo).
 
-- [ ] **Step 6: Commit (only if a config file or doc change is needed)**
+- [ ] **Step 7: Commit (only if a config file or doc change is needed)**
 
 The cron change is outside the repo, so usually no commit is needed for this step. If the user asked to record the new cron's job id in a config file (e.g., `config/cron.txt` or a comment in `README.md`), do that as a separate small commit. Otherwise, this task ends without a commit.
 
@@ -1395,11 +1561,11 @@ If no file needs to be touched, simply report: "Cron updated; no commit needed."
 
 - [ ] **Spec coverage.** Each spec section/requirement has a corresponding task. Cross-check:
   - Spec §3 architecture → Task 1 (`cc_timers.py`) + Task 2 (helpers in `cli.py`) + Task 3 (subcommand) + Task 4 (cron)
-  - Spec §4.1 planned set → Task 3 `subcommand_rebuild_timers` step 4
-  - Spec §4.2 actual set → Task 1 `cc_timers.list_today_remaining` + Task 2 `parse_slot_start_from_description`
-  - Spec §4.3 diff → Task 2 `reconcile_timers`
+  - Spec §4.1 planned set → Task 3 `subcommand_rebuild_timers` step 4 (single `compute_schedule(max_slots=len(slots))` + filter past)
+  - Spec §4.2 actual set → Task 1 `cc_timers.list_today_remaining` + Task 2 `parse_slot_start_from_description` + `parse_task_id_from_description`
+  - Spec §4.3 diff → Task 2 `reconcile_timers` (match by `(slot_start, task_id)` tuple)
   - Spec §4.4 output format → Task 2 `format_rebuild_summary` + Task 3 JSON branch
-  - Spec §4.5 prompt format → Task 2 `build_slot_prompt`
+  - Spec §4.5 prompt format → Task 2 `build_slot_prompt` (task_id embedded in first line)
   - Spec §5 error handling → Task 3 `subcommand_rebuild_timers` (try/except per slot, apply-failures list, `_emit_error` calls)
   - Spec §5.6 edge cases → all nine integration tests in Task 3 plus the no-focus / late-night cases
   - Spec §6 testing → Task 1 (no separate test, exercised in Task 3) + Task 2 (10 unit tests) + Task 3 (9 integration tests)
@@ -1410,17 +1576,18 @@ If no file needs to be touched, simply report: "Cron updated; no commit needed."
 
 - [ ] **Type consistency.** Cross-check signatures referenced in multiple tasks:
   - `cc_timers.list_all() -> list[dict]` with keys `id, fire_at, description` — used in Task 1's smoke test and in Task 3's `list_today_remaining` impl
-  - `cc_timers.add(prompt, fire_at_iso) -> dict` — used in Task 3's subcommand body
+  - `cc_timers.add(prompt, fire_at_iso, description=None) -> dict` — used in Task 3's subcommand body
   - `cc_timers.delete(timer_id) -> None` — used in Task 3's subcommand body
   - `cc_timers.list_today_remaining(today) -> (own, foreign)` — used in Task 3
   - `reconcile_timers(planned, actual) -> {"to_add", "to_remove"}` — defined in Task 2, used in Task 3
   - `parse_slot_start_from_description(description) -> str | None` — defined in Task 2, used in Task 3
-  - `build_slot_description(date, slot_start, slot_label) -> str` — defined in Task 2
-  - `build_slot_prompt(date, slot_start, slot_end, slot_label) -> str` — defined in Task 2, used in Task 3
+  - `parse_task_id_from_description(description) -> str | None` — defined in Task 2, used in Task 3
+  - `build_slot_description(date, slot_start, slot_label, task_id) -> str` — defined in Task 2
+  - `build_slot_prompt(date, slot_start, slot_end, slot_label, task_id) -> str` — defined in Task 2, used in Task 3
   - `format_rebuild_summary(date, added, removed, kept, ignored_foreign, today_had_no_slots, no_focus) -> str` — defined in Task 2, used in Task 3
   - `subcommand_rebuild_timers(args, as_json) -> int` — defined in Task 3, dispatched in `_build_parser` and `run`
 
-- [ ] **Edge case re-check.** A slot whose planned task is too big for the slot duration is handled in Task 3 via the `if plan_one[0]["slot_start"] != slot["start"]: continue` check after `compute_schedule(focus, today, prev_end, max_slots=1)`. Confirmed by reading the scheduler code in `scripts/scheduler.py`: when the candidate's `estimated_hours` exceeds `_slot_duration_hours(slot)`, the function moves to the next slot, so the returned plan's first entry's `slot_start` will not match the slot we asked about.
+- [ ] **Edge case re-check.** A slot whose planned task is too big for the slot duration is handled by the scheduler itself: when the candidate's `estimated_hours` exceeds `_slot_duration_hours(slot)`, `compute_schedule` moves to the next slot, so the returned plan's entries already align with slots. The Task 3 subcommand filters past slot_starts after the single compute_schedule call, so any past `entry["slot_start"]` is dropped. Confirmed by reading `scripts/scheduler.py`.
 
 - [ ] **Time mocking reality check.** `freezegun.freeze_time` patches `datetime.now()` globally for the test. The cc_timers file backend uses `datetime.now()` to filter `list_today_remaining`; the integration test's `freeze_time("2026-08-04 14:00:00")` makes 18:00 and 21:00 count as future and 12:00 count as past. Confirmed correct.
 
