@@ -19,13 +19,6 @@ CLI_SCRIPT = REPO_ROOT / "scripts" / "cli.py"
 SCHEMA_PATH = REPO_ROOT / "data" / "schema.sql"
 
 
-# Allow unit tests below to do `from cli import reconcile_timers` etc.
-# The integration tests still use subprocess (unchanged behavior).
-import importlib.util as _ilu
-_cli_spec = _ilu.spec_from_file_location("cli", str(CLI_SCRIPT))
-_cli_module = _ilu.module_from_spec(_cli_spec)
-_cli_spec.loader.exec_module(_cli_module)
-sys.modules["cli"] = _cli_module
 
 
 def _init_db(db_path: Path) -> None:
@@ -673,6 +666,15 @@ class TestReconcileTimers:
     All actual items below include both slot_start and task_id, which is
     the format that production timers will have after Item 2 ships.
     """
+    @pytest.fixture(autouse=True, scope="class")
+    @classmethod
+    def _load_cli_module(cls):
+        import importlib.util as _ilu
+        _cli_spec = _ilu.spec_from_file_location("cli", str(CLI_SCRIPT))
+        _cli_module = _ilu.module_from_spec(_cli_spec)
+        _cli_spec.loader.exec_module(_cli_module)
+        sys.modules["cli"] = _cli_module
+        yield
 
     def test_reconcile_empty_inputs(self):
         from cli import reconcile_timers
@@ -794,6 +796,15 @@ class TestSlotPromptHelpers:
     """Unit tests for parse_slot_start_from_description,
     parse_task_id_from_description, build_slot_description,
     build_slot_prompt."""
+    @pytest.fixture(autouse=True, scope="class")
+    @classmethod
+    def _load_cli_module(cls):
+        import importlib.util as _ilu
+        _cli_spec = _ilu.spec_from_file_location("cli", str(CLI_SCRIPT))
+        _cli_module = _ilu.module_from_spec(_cli_spec)
+        _cli_spec.loader.exec_module(_cli_module)
+        sys.modules["cli"] = _cli_module
+        yield
 
     def test_parse_slot_start_from_description_our_format(self):
         from cli import parse_slot_start_from_description
