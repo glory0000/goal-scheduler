@@ -373,3 +373,229 @@ def test_goal_add_json(tmp_path):
     assert parsed["name"] == "A股量化"
     assert parsed["status"] == "active"
     assert "created_at" in parsed
+
+
+# -------------------- task add --------------------
+
+def test_task_add_simple(tmp_path):
+    db_path = tmp_path / "todos.db"
+    _init_db(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO goals (slug, name, description, status, "
+            "total_tasks, completed_tasks, created_at, updated_at) "
+            "VALUES ('a-stock-quant', 'A股量化', '', 'active', "
+            "0, 0, '2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.commit()
+
+    result = run_cli(
+        ["task", "add", "a-stock-quant-T013", "a-stock-quant", "13",
+         "跑通回测示例", "--hours", "1.0"],
+        db_path=db_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    with sqlite3.connect(str(db_path)) as conn:
+        row = conn.execute(
+            "SELECT goal_slug, sequence, title, estimated_hours, status "
+            "FROM tasks WHERE id='a-stock-quant-T013'"
+        ).fetchone()
+    assert row[0] == "a-stock-quant"
+    assert row[1] == 13
+    assert row[2] == "跑通回测示例"
+    assert row[3] == 1.0
+    assert row[4] == "pending"
+
+
+def test_task_add_with_dependencies(tmp_path):
+    db_path = tmp_path / "todos.db"
+    _init_db(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO goals (slug, name, description, status, "
+            "total_tasks, completed_tasks, created_at, updated_at) "
+            "VALUES ('a-stock-quant', 'A股量化', '', 'active', "
+            "0, 0, '2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO tasks (id, goal_slug, sequence, title, description, "
+            "estimated_hours, depends_on, status, last_reminded_at, "
+            "completed_at, created_at, updated_at) "
+            "VALUES ('a-stock-quant-T012', 'a-stock-quant', 12, '前置任务', "
+            "'', 1.0, '[]', 'pending', NULL, NULL, "
+            "'2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.commit()
+
+    result = run_cli(
+        ["task", "add", "a-stock-quant-T013", "a-stock-quant", "13",
+         "后续任务", "--hours", "1.0",
+         "--depends-on", "a-stock-quant-T012"],
+        db_path=db_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    with sqlite3.connect(str(db_path)) as conn:
+        row = conn.execute(
+            "SELECT depends_on FROM tasks WHERE id='a-stock-quant-T013'"
+        ).fetchone()
+    assert json.loads(row[0]) == ["a-stock-quant-T012"]
+
+
+def test_task_add_missing_required_arg(tmp_path):
+    """No --hours → defaults to 0.0 (not an error)."""
+    db_path = tmp_path / "todos.db"
+    _init_db(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO goals (slug, name, description, status, "
+            "total_tasks, completed_tasks, created_at, updated_at) "
+            "VALUES ('a-stock-quant', 'A股量化', '', 'active', "
+            "0, 0, '2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.commit()
+
+    result = run_cli(
+        ["task", "add", "a-stock-quant-T013", "a-stock-quant", "13",
+         "跑通回测示例"],
+        db_path=db_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    with sqlite3.connect(str(db_path)) as conn:
+        row = conn.execute(
+            "SELECT estimated_hours FROM tasks WHERE id='a-stock-quant-T013'"
+        ).fetchone()
+    assert row[0] == 0.0
+
+
+def test_task_add_goal_not_found(tmp_path):
+    db_path = tmp_path / "todos.db"
+    _init_db(db_path)
+
+    result = run_cli(
+        ["task", "add", "missing-T001", "missing", "1", "任务"],
+        db_path=db_path,
+    )
+
+    assert result.returncode == 3
+    assert "not found" in result.stderr or "missing" in result.stderr
+    assert result.stdout == ""
+
+
+# -------------------- task update --------------------
+
+def test_task_update_done(tmp_path):
+    db_path = tmp_path / "todos.db"
+    _init_db(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO goals (slug, name, description, status, "
+            "total_tasks, completed_tasks, created_at, updated_at) "
+            "VALUES ('a-stock-quant', 'A股量化', '', 'active', "
+            "0, 0, '2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO tasks (id, goal_slug, sequence, title, description, "
+            "estimated_hours, depends_on, status, last_reminded_at, "
+            "completed_at, created_at, updated_at) "
+            "VALUES ('a-stock-quant-T013', 'a-stock-quant', 13, '跑通回测示例', "
+            "'', 1.0, '[]', 'pending', NULL, NULL, "
+            "'2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.commit()
+
+    result = run_cli(
+        ["task", "update", "a-stock-quant-T013", "done"],
+        db_path=db_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    with sqlite3.connect(str(db_path)) as conn:
+        row = conn.execute(
+            "SELECT status, completed_at FROM tasks "
+            "WHERE id='a-stock-quant-T013'"
+        ).fetchone()
+    assert row[0] == "done"
+    assert row[1] is not None  # completed_at was stamped
+
+
+def test_task_update_idempotent_no_op(tmp_path):
+    db_path = tmp_path / "todos.db"
+    _init_db(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO goals (slug, name, description, status, "
+            "total_tasks, completed_tasks, created_at, updated_at) "
+            "VALUES ('a-stock-quant', 'A股量化', '', 'active', "
+            "0, 0, '2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO tasks (id, goal_slug, sequence, title, description, "
+            "estimated_hours, depends_on, status, last_reminded_at, "
+            "completed_at, created_at, updated_at) "
+            "VALUES ('a-stock-quant-T013', 'a-stock-quant', 13, '跑通回测示例', "
+            "'', 1.0, '[]', 'done', NULL, '2026-08-04T12:00:00', "
+            "'2026-08-04T00:00:00', '2026-08-04T12:00:00')"
+        )
+        conn.commit()
+
+    result = run_cli(
+        ["task", "update", "a-stock-quant-T013", "done"],
+        db_path=db_path,
+    )
+
+    assert result.returncode == 0
+    assert "no change" in result.stdout.lower()
+    # DB not touched (completed_at still 12:00:00)
+    with sqlite3.connect(str(db_path)) as conn:
+        row = conn.execute(
+            "SELECT completed_at FROM tasks WHERE id='a-stock-quant-T013'"
+        ).fetchone()
+    assert row[0] == "2026-08-04T12:00:00"
+
+
+def test_task_update_invalid_status(tmp_path):
+    db_path = tmp_path / "todos.db"
+    _init_db(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO goals (slug, name, description, status, "
+            "total_tasks, completed_tasks, created_at, updated_at) "
+            "VALUES ('a-stock-quant', 'A股量化', '', 'active', "
+            "0, 0, '2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO tasks (id, goal_slug, sequence, title, description, "
+            "estimated_hours, depends_on, status, last_reminded_at, "
+            "completed_at, created_at, updated_at) "
+            "VALUES ('a-stock-quant-T013', 'a-stock-quant', 13, '跑通回测示例', "
+            "'', 1.0, '[]', 'pending', NULL, NULL, "
+            "'2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.commit()
+
+    result = run_cli(
+        ["task", "update", "a-stock-quant-T013", "frobnicate"],
+        db_path=db_path,
+    )
+
+    assert result.returncode == 1
+    assert "Invalid status" in result.stderr
+    assert "frobnicate" in result.stderr
+    assert result.stdout == ""
+
+
+def test_task_update_task_not_found(tmp_path):
+    db_path = tmp_path / "todos.db"
+    _init_db(db_path)
+
+    result = run_cli(
+        ["task", "update", "T999", "done"],
+        db_path=db_path,
+    )
+
+    assert result.returncode == 3
+    assert "not found" in result.stderr or "T999" in result.stderr
+    assert result.stdout == ""

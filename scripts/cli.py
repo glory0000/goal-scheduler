@@ -199,11 +199,96 @@ def subcommand_goal_add(args, as_json: bool) -> int:
 
 
 def subcommand_task_add(args, as_json: bool) -> int:
-    raise NotImplementedError("not yet implemented")
+    # Validate task id format: <slug>-T<digits>
+    m = re.match(r"^(?P<slug>[a-z0-9][a-z0-9-]{0,62})-T\d{3,}$", args.task_id)
+    if not m:
+        _emit_error(
+            f"Invalid task id: must match '<slug>-T<digits>'.",
+            code=1,
+        )
+    # The embedded slug must match args.goal_slug.
+    if m.group("slug") != args.goal_slug:
+        _emit_error(
+            f"Task id '{args.task_id}' slug does not match "
+            f"'{args.goal_slug}'.",
+            code=1,
+        )
+    if args.hours < 0:
+        _emit_error("Hours must be ≥ 0.", code=1)
+    if db.get_goal(args.goal_slug) is None:
+        _emit_error(f"Goal '{args.goal_slug}' not found.", code=3)
+    if db.get_task(args.task_id) is not None:
+        _emit_error(f"Task '{args.task_id}' already exists.", code=1)
+    # Validate depends-on ids.
+    for dep in args.depends_on:
+        dep_task = db.get_task(dep)
+        if dep_task is None or dep_task["goal_slug"] != args.goal_slug:
+            _emit_error(
+                f"Depends-on task '{dep}' not found in goal "
+                f"'{args.goal_slug}'.",
+                code=1,
+            )
+    db.create_task(
+        args.task_id, args.goal_slug, args.sequence, args.title, "",
+        args.hours, args.depends_on,
+    )
+    created = db.get_task(args.task_id)
+    if as_json:
+        print(to_json({
+            "id": created["id"],
+            "goal_slug": created["goal_slug"],
+            "sequence": created["sequence"],
+            "title": created["title"],
+            "estimated_hours": created["estimated_hours"],
+            "depends_on": created["depends_on"],
+            "status": created["status"],
+        }))
+    else:
+        print(f"Task {created['id']} created.")
+    return 0
 
 
 def subcommand_task_update(args, as_json: bool) -> int:
-    raise NotImplementedError("not yet implemented")
+    if args.status not in VALID_STATUSES:
+        _emit_error(
+            f"Invalid status '{args.status}'. "
+            f"Valid: {', '.join(VALID_STATUSES)}.",
+            code=1,
+        )
+    task = db.get_task(args.task_id)
+    if task is None:
+        _emit_error(f"Task '{args.task_id}' not found.", code=3)
+    if task["status"] == args.status:
+        # Idempotent: no DB change, exit 0.
+        if as_json:
+            print(to_json({
+                "id": task["id"],
+                "status": task["status"],
+                "started_at": task.get("started_at"),
+                "completed_at": task.get("completed_at"),
+                "updated_at": task.get("updated_at"),
+            }))
+        else:
+            print(f"Task {task['id']} already {args.status} (no change).")
+        return 0
+    db.update_task_status(args.task_id, args.status)
+    updated = db.get_task(args.task_id)
+    if as_json:
+        print(to_json({
+            "id": updated["id"],
+            "status": updated["status"],
+            "started_at": updated.get("started_at"),
+            "completed_at": updated.get("completed_at"),
+            "updated_at": updated.get("updated_at"),
+        }))
+    else:
+        suffix = ""
+        if args.status == "in_progress" and updated.get("started_at"):
+            suffix = f" at {updated['started_at']}"
+        elif args.status == "done" and updated.get("completed_at"):
+            suffix = f" at {updated['completed_at']}"
+        print(f"Task {updated['id']} marked {args.status}{suffix}.")
+    return 0
 
 
 def subcommand_focus(args, as_json: bool) -> int:
