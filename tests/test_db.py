@@ -1,8 +1,15 @@
 import os
+import subprocess
 import sys
 import tempfile
+from pathlib import Path
 import pytest
 import sqlite3
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DB_SCRIPT = REPO_ROOT / "scripts" / "db.py"
+CLI_SCRIPT = REPO_ROOT / "scripts" / "cli.py"
+DATA_SCHEMA = REPO_ROOT / "data" / "schema.sql"
 
 # Use a temp DB for tests
 TEST_DB_DIR = tempfile.mkdtemp()
@@ -340,3 +347,150 @@ class TestArchiveRestore:
         self._make_task(status="done")
         with pytest.raises(ValueError, match="not archived"):
             db.restore_task("g-T001")
+
+
+# ============ cmd_init (db.py init CLI) ============
+
+def _run_db(args: list[str], db_path: Path) -> subprocess.CompletedProcess:
+    """Invoke scripts/db.py with isolated TODO_DB_PATH."""
+    env = os.environ.copy()
+    env.pop("TODO_DB_PATH", None)
+    env["TODO_DB_PATH"] = str(db_path)
+    return subprocess.run(
+        [sys.executable, str(DB_SCRIPT)] + list(args),
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _run_cli(args: list[str], db_path: Path) -> subprocess.CompletedProcess:
+    """Invoke scripts/cli.py with isolated DB + GOALS_DIR."""
+    env = os.environ.copy()
+    env.pop("TODO_DB_PATH", None)
+    env.pop("TODO_GOALS_DIR", None)
+    env["TODO_DB_PATH"] = str(db_path)
+    env["TODO_GOALS_DIR"] = str(db_path.parent / "goals")
+    return subprocess.run(
+        [sys.executable, str(CLI_SCRIPT)] + list(args),
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _read_schema_version(db_path: Path) -> int | None:
+    with sqlite3.connect(str(db_path)) as conn:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
+        ).fetchone()
+        if not row:
+            return None
+        return conn.execute("SELECT version FROM schema_version").fetchone()[0]
+
+
+def _read_sqlite_table_names(db_path: Path) -> set[str]:
+    with sqlite3.connect(str(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    return {r[0] for r in rows}
+
+
+class TestDbInit:
+    """Tests for `python scripts/db.py init` — the single-command bootstrap.
+
+    Before this fix, `db.py init` only ran schema.sql (which lacks the
+    schema_version table), so the CLI's `_require_initialized_db()` gate
+    still rejected the DB and users had to also run `migrate.py init`.
+    After the fix, `db.py init` creates schema_version + stamps v1,
+    making the CLI self-sufficient on a fresh DB. migrate.py init
+    remains idempotent on top of this.
+    """
+
+    def test_init_creates_schema_version_on_fresh_db(self, tmp_path):
+        db_path = tmp_path / "fresh.db"
+
+        result = _run_db(["init"], db_path)
+
+        assert result.returncode == 0, result.stderr
+        tables = _read_sqlite_table_names(db_path)
+        assert {"goals", "tasks", "settings", "schema_version"} <= tables
+        assert _read_schema_version(db_path) == 1
+        assert "version 1" in result.stdout
+
+    def test_init_is_idempotent(self, tmp_path):
+        db_path = tmp_path / "twice.db"
+
+        first = _run_db(["init"], db_path)
+        assert first.returncode == 0, first.stderr
+        assert _read_schema_version(db_path) == 1
+
+        second = _run_db(["init"], db_path)
+
+        assert second.returncode == 0, second.stderr
+        assert _read_schema_version(db_path) == 1
+        assert "already initialized" in second.stdout
+
+    def test_init_stamps_baseline_on_partial_state(self, tmp_path):
+        """DB has goals/tasks/settings (from an older db.py init that only
+        ran schema.sql) but no schema_version. The fix must add
+        schema_version=1 without disturbing existing tables."""
+        db_path = tmp_path / "partial.db"
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.executescript(DATA_SCHEMA.read_text())
+
+        # Sanity: schema_version absent before the fixup.
+        assert "schema_version" not in _read_sqlite_table_names(db_path)
+
+        result = _run_db(["init"], db_path)
+
+        assert result.returncode == 0, result.stderr
+        assert _read_schema_version(db_path) == 1
+        # goals/tasks/settings must still be there.
+        tables = _read_sqlite_table_names(db_path)
+        assert {"goals", "tasks", "settings"} <= tables
+        assert "version 1" in result.stdout
+
+    def test_init_makes_cli_commands_work(self, tmp_path):
+        """End-to-end: after JUST `db.py init` (no `migrate.py init`),
+        the CLI's `_require_initialized_db()` gate must pass and a real
+        subcommand must succeed."""
+        db_path = tmp_path / "end_to_end.db"
+
+        init_result = _run_db(["init"], db_path)
+        assert init_result.returncode == 0, init_result.stderr
+
+        # Without migrate.py init, `cli.py goal list` previously exited 2
+        # with "Run `python scripts/db.py init` first." — the bug.
+        cli_result = _run_cli(["goal", "list"], db_path)
+
+        assert cli_result.returncode == 0, cli_result.stderr
+        assert "Run `python scripts/db.py init` first" not in cli_result.stderr
+        assert "(no goals)" in cli_result.stdout
+
+    def test_init_does_not_overwrite_existing_schema_version(self, tmp_path):
+        """If schema_version already exists at a higher version (e.g. a
+        `migrate.py upgrade` ran), `db.py init` must NOT downgrade it."""
+        db_path = tmp_path / "v3.db"
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.executescript(DATA_SCHEMA.read_text())
+            conn.executescript(
+                "CREATE TABLE schema_version ("
+                "  version INTEGER PRIMARY KEY,"
+                "  applied_at TEXT NOT NULL"
+                ")"
+            )
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (3, ?)",
+                ("2026-01-01T00:00:00",),
+            )
+            conn.commit()
+
+        result = _run_db(["init"], db_path)
+
+        assert result.returncode == 0, result.stderr
+        assert _read_schema_version(db_path) == 3
+        assert "already initialized" in result.stdout

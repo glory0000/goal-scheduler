@@ -362,12 +362,49 @@ def write_goal_md_progress(slug: str) -> None:
         f.write(text)
 
 
+def cmd_init() -> int:
+    """Bootstrap DB: apply schema.sql, create schema_version, stamp v1.
+
+    Idempotent. A fresh DB ends up with all four tables (goals, tasks,
+    settings, schema_version) and schema_version=1. Re-running prints
+    "DB already initialized at version 1" and exits 0. A DB that already
+    has goals/tasks/settings but no schema_version (e.g. created by an
+    older `db.py init` that only ran schema.sql) gets schema_version
+    added without disturbing existing data.
+
+    This makes `db.py init` self-sufficient — the CLI's
+    `_require_initialized_db()` gate keys on schema_version, so a single
+    `db.py init` is now enough to run any CLI command. `migrate.py init`
+    still works and is idempotent with this path.
+    """
+    schema_path = os.path.join(os.path.dirname(__file__), "..", "data", "schema.sql")
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
+        ).fetchone()
+        if row is not None:
+            version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+            print(f"DB already initialized at version {version}")
+            return 0
+
+        with open(schema_path) as f:
+            conn.executescript(f.read())
+        conn.executescript(
+            "CREATE TABLE schema_version ("
+            "  version INTEGER PRIMARY KEY,"
+            "  applied_at TEXT NOT NULL"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (1, ?)",
+            (now_iso(),),
+        )
+        conn.commit()
+    print("DB initialized at version 1")
+    return 0
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) >= 2 and sys.argv[1] == "init":
-        # Run schema
-        schema_path = os.path.join(os.path.dirname(__file__), "..", "data", "schema.sql")
-        with open(schema_path) as f:
-            with get_conn() as conn:
-                conn.executescript(f.read())
-        print("DB initialized.")
+        sys.exit(cmd_init())
