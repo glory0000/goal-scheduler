@@ -26,6 +26,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 import db  # noqa: E402
 import scheduler  # noqa: E402
 from cli_output import format_status_overview, format_today_view, to_json  # noqa: E402
+from sync_md import sync_index_md, compute_completion_pct  # noqa: E402
 
 # ---- shared constants ----
 
@@ -368,6 +369,17 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("rebuild-timers",
                    help="Reconcile today's planned timers with cc-connect")
 
+    # Use a parents group so --json is accepted whether it appears before
+    # or after the subcommand (argparse inherits the flag onto the subparser).
+    sync_md_parent = argparse.ArgumentParser(add_help=False)
+    sync_md_parent.add_argument(
+        "--json", action="store_true",
+        help="Emit a single JSON object on stdout",
+    )
+    sub.add_parser("sync-md",
+                   help="Regenerate goals/index.md from current DB state",
+                   parents=[sync_md_parent])
+
     focus_p = sub.add_parser("focus", help="Today's focus")
     focus_sub = focus_p.add_subparsers(dest="focus_command", required=True)
     fs = focus_sub.add_parser("set", help="Set today's focus")
@@ -382,7 +394,11 @@ def _build_parser() -> argparse.ArgumentParser:
 def run(args: list[str]) -> int:
     parser = _build_parser()
     parsed = parser.parse_args(args)
-    as_json = parsed.json
+    # `parsed.json` may not exist if the subparser consumed --json instead
+    # of the top-level parser (e.g., for sync-md where --json can appear
+    # after the subcommand). Prefer the top-level flag; fall back to the
+    # subparser's parsed value.
+    as_json = getattr(parsed, "json", False)
 
     _require_initialized_db()
 
@@ -399,6 +415,8 @@ def run(args: list[str]) -> int:
             return subcommand_task_update(parsed, as_json)
         if parsed.command == "rebuild-timers":
             return subcommand_rebuild_timers(parsed, as_json)
+        if parsed.command == "sync-md":
+            return subcommand_sync_md(parsed, as_json)
         if parsed.command == "focus":
             return subcommand_focus(parsed, as_json)
     except NotImplementedError as exc:
@@ -748,6 +766,48 @@ def subcommand_rebuild_timers(args, as_json: bool) -> int:
         print(format_rebuild_summary(
             today, diff["to_add"], diff["to_remove"], kept, foreign,
         ))
+    return 0
+
+
+# ---- sync-md ----
+
+def subcommand_sync_md(args, as_json: bool) -> int:
+    """Regenerate goals/index.md from current SQLite state.
+
+    Always full-sync (no --goal filter in v1). Atomic write; warnings
+    (orphan dirs, missing goal.md) go to stderr but do not block exit 0.
+    """
+    result = sync_index_md(Path("goals"))
+    for w in result.warnings:
+        print(f"warning: {w}", file=sys.stderr)
+    if as_json:
+        print(to_json({
+            "path": str(result.path),
+            "synced_count": result.synced_count,
+            "by_status": result.by_status,
+            "changed": result.changed,
+            "unchanged": result.unchanged,
+            "warnings": result.warnings,
+            "header_preserved": result.header_preserved,
+        }))
+    else:
+        active_n = result.by_status.get("active", 0)
+        paused_n = result.by_status.get("paused", 0)
+        completed_n = result.by_status.get("completed", 0)
+        print(
+            f"Synced {result.synced_count} goals to {result.path} "
+            f"(active={active_n}, paused={paused_n}, completed={completed_n})"
+        )
+        # Per-goal lines: "- <marker><slug>  (<label> <pct>%)"
+        # marker is "+" if the slug appears in result.changed, " " otherwise.
+        changed_set = set(result.changed)
+        label_map = {"active": "进行中", "paused": "已暂停", "completed": "已完成"}
+        for g in db.list_goals():
+            slug = g["slug"]
+            label = label_map.get(g["status"], g["status"])
+            pct = compute_completion_pct(db.list_tasks(goal_slug=slug))
+            marker = "+" if slug in changed_set else " "
+            print(f"- {marker}{slug:<20} ({label} {pct}%)")
     return 0
 
 

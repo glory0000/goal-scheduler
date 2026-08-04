@@ -49,11 +49,14 @@ def run_cli(
     db_path: Path,
     timer_file: Path | None = None,
     now: datetime | None = None,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess:
     """Invoke scripts/cli.py with isolated TODO_DB_PATH and (optionally)
     TODO_TEST_TIMER_FILE. Existing tests that don't pass timer_file see
     the same behavior as before. Accepts an optional `now` parameter for
-    freezing time in the subprocess (requires support in cli.py)."""
+    freezing time in the subprocess (requires support in cli.py). Accepts
+    an optional `cwd` parameter to change the subprocess's working directory
+    (defaults to REPO_ROOT for backwards compatibility)."""
     env = os.environ.copy()
     env.pop("TODO_DB_PATH", None)
     env["TODO_DB_PATH"] = str(db_path)
@@ -65,7 +68,7 @@ def run_cli(
         env["TEST_NOW_DATETIME"] = now.isoformat()
     return subprocess.run(
         [sys.executable, str(CLI_SCRIPT), *args],
-        cwd=str(REPO_ROOT),
+        cwd=str(cwd) if cwd is not None else str(REPO_ROOT),
         env=env,
         capture_output=True,
         text=True,

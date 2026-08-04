@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
+import json
 import pytest
+import sqlite3
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
 
 # Import the module under test. We do this via sys.path manipulation so the
 # test file matches the cli test layout (which uses subprocess, but the
 # pure-function tests here import directly for speed).
-import sys
-from pathlib import Path
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import sync_md  # noqa: E402
+
+# For TestSyncMdCli, also import from tests.test_cli:
+_sys = sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_cli import _init_db, run_cli  # type: ignore
 
 
 # -------------------- TestRenderIndexMd --------------------
@@ -261,3 +269,126 @@ class TestSyncIndexMd:
         content = (goals_dir / "index.md").read_text(encoding="utf-8")
         assert content.startswith("# 目标索引\n\n手写说明。\n")
         assert content.count("## 进行中") == 1
+
+
+# -------------------- TestSyncMdCli --------------------
+
+class TestSyncMdCli:
+    def _seed(self, tmp_path: Path, goals: list[dict], tasks: list[dict]) -> Path:
+        """Seed an isolated DB and return its path.
+
+        Goals are also created on disk under tmp_path/goals/<slug>/goal.md
+        so sync_index_md can verify them as non-orphan.
+        """
+        db_path = tmp_path / "todos.db"
+        _init_db(db_path)
+        with sqlite3.connect(str(db_path)) as conn:
+            for g in goals:
+                conn.execute(
+                    "INSERT INTO goals (slug, name, description, status, "
+                    "total_tasks, completed_tasks, created_at, updated_at) "
+                    "VALUES (?, ?, '', ?, 0, 0, '2026-08-04T00:00:00', "
+                    "'2026-08-04T00:00:00')",
+                    (g["slug"], g["name"], g["status"]),
+                )
+                (tmp_path / "goals" / g["slug"]).mkdir(parents=True, exist_ok=True)
+                (tmp_path / "goals" / g["slug"] / "goal.md").write_text(
+                    f"# {g['name']}\n", encoding="utf-8"
+                )
+            for t in tasks:
+                conn.execute(
+                    "INSERT INTO tasks (id, goal_slug, sequence, title, "
+                    "description, estimated_hours, depends_on, status, "
+                    "last_reminded_at, completed_at, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, '', 0.0, '[]', ?, NULL, NULL, "
+                    "'2026-08-04T00:00:00', '2026-08-04T00:00:00')",
+                    (t["id"], t["goal_slug"], t["sequence"], f"Task {t['id']}", t["status"]),
+                )
+            conn.commit()
+        return db_path
+
+    def test_human_output_default(self, tmp_path):
+        db_path = self._seed(
+            tmp_path,
+            goals=[{"slug": "foo", "name": "Foo", "status": "active"}],
+            tasks=[],
+        )
+        result = run_cli(["sync-md"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert "Synced" in result.stdout
+        assert "active=1" in result.stdout
+        # File was written under tmp_path/goals/.
+        assert (tmp_path / "goals" / "index.md").exists()
+
+    def test_json_output_shape(self, tmp_path):
+        db_path = self._seed(
+            tmp_path,
+            goals=[
+                {"slug": "foo", "name": "Foo", "status": "active"},
+                {"slug": "bar", "name": "Bar", "status": "paused"},
+            ],
+            tasks=[],
+        )
+        result = run_cli(["sync-md", "--json"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert set(data.keys()) >= {
+            "path", "synced_count", "by_status", "changed", "unchanged",
+            "warnings", "header_preserved",
+        }
+        assert data["synced_count"] == 2
+        assert data["by_status"] == {"active": 1, "paused": 1, "completed": 0}
+
+    def test_db_uninitialized_exits_2(self, tmp_path):
+        # Don't seed; use an empty DB with no schema_version.
+        empty_db = tmp_path / "empty.db"
+        empty_db.touch()
+        result = run_cli(["sync-md"], db_path=empty_db, cwd=tmp_path)
+        assert result.returncode == 2
+        assert "Run `python scripts/db.py init` first" in result.stderr
+
+    def test_warnings_on_stderr(self, tmp_path):
+        db_path = self._seed(
+            tmp_path,
+            goals=[{"slug": "real", "name": "R", "status": "active"}],
+            tasks=[],
+        )
+        # Add an orphan dir.
+        (tmp_path / "goals" / "orphan").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "goals" / "orphan" / "goal.md").write_text(
+            "# O\n", encoding="utf-8"
+        )
+        result = run_cli(["sync-md"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0  # warnings don't block
+        assert "warning" in result.stderr.lower()
+        assert "orphan" in result.stderr
+
+    def test_warnings_dont_block_exit_0(self, tmp_path):
+        db_path = self._seed(
+            tmp_path,
+            goals=[{"slug": "ok", "name": "OK", "status": "active"}],
+            tasks=[],
+        )
+        (tmp_path / "goals" / "stray").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "goals" / "stray" / "goal.md").write_text("# S\n", encoding="utf-8")
+        result = run_cli(["sync-md"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0
+        # Index.md still written.
+        assert (tmp_path / "goals" / "index.md").exists()
+
+    def test_idempotent_second_run(self, tmp_path):
+        db_path = self._seed(
+            tmp_path,
+            goals=[{"slug": "x", "name": "X", "status": "active"}],
+            tasks=[{"id": "x-T001", "goal_slug": "x", "sequence": 1, "status": "done"}],
+        )
+        # First run.
+        r1 = run_cli(["sync-md"], db_path=db_path, cwd=tmp_path)
+        assert r1.returncode == 0
+        first = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
+        # Second run.
+        r2 = run_cli(["sync-md"], db_path=db_path, cwd=tmp_path)
+        assert r2.returncode == 0
+        second = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
+        assert first == second
+
