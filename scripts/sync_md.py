@@ -155,6 +155,8 @@ class SyncResult:
     synced_count: int
     by_status: dict[str, int] = field(default_factory=dict)
     changed: list[str] = field(default_factory=list)
+    added: list[str] = field(default_factory=list)
+    goals: list[dict] = field(default_factory=list)
     unchanged: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     header_preserved: bool = False
@@ -253,9 +255,16 @@ def sync_index_md(goals_root: Path) -> SyncResult:
     tasks = db.list_tasks()  # all goals
     tasks_by_goal = group_tasks_by_goal(tasks)
 
-    # 3. Detect orphan dirs (no DB row) and DB goals missing goal.md.
+    # 3. Detect orphan dirs (no DB row), DB goals missing their directory,
+    #    and DB goals whose goal.md is missing.
     warnings: list[str] = []
     db_slugs = {g["slug"] for g in goals}
+    # I3: DB goal has no goals/<slug>/ directory at all.
+    for slug in sorted(db_slugs):
+        if not (goals_root / slug).is_dir():
+            warnings.append(
+                f"goal '{slug}' has no goals/{slug}/"
+            )
     for entry in sorted(goals_root.iterdir()):
         if not entry.is_dir():
             continue
@@ -275,8 +284,21 @@ def sync_index_md(goals_root: Path) -> SyncResult:
             new_lines[match.group("slug")] = line
 
     all_slugs = set(old_lines) | set(new_lines)
-    changed = sorted(s for s in all_slugs if old_lines.get(s) != new_lines.get(s))
-    unchanged = sorted(all_slugs - set(changed))
+    new_slugs = set(new_lines)
+    old_slugs = set(old_lines)
+    # I4: distinguish added (newly appeared) from changed (pre-existing,
+    # but rendered line differs). The CLI uses this to emit '+' vs '~'
+    # markers in the human output.
+    added = sorted(new_slugs - old_slugs)
+    # Only slugs present in BOTH old and new lines are "changed" if their
+    # rendered line differs. Slugs only in old (removed) are not tracked
+    # here in v1.
+    changed = sorted(
+        s for s in new_slugs & old_slugs if old_lines[s] != new_lines[s]
+    )
+    unchanged = sorted(
+        s for s in new_slugs & old_slugs if old_lines[s] == new_lines[s]
+    )
 
     # 5. Atomic write.
     tmp_path = index_path.with_suffix(index_path.suffix + ".tmp")
@@ -287,11 +309,26 @@ def sync_index_md(goals_root: Path) -> SyncResult:
     for g in goals:
         by_status[g["status"]] = by_status.get(g["status"], 0) + 1
 
+    # M9: warn about goals with unknown statuses (outside the three
+    # buckets). `_group_and_sort` silently drops them from the rendered
+    # list and the by_status dict above, so without this warning the
+    # user sees `synced_count=N` but the rendered index has fewer rows.
+    known_statuses = set(_GROUP_ORDER)
+    unknown_statuses = sorted({g.get("status") for g in goals} - known_statuses)
+    for status_key in unknown_statuses:
+        if status_key is None:
+            continue
+        warnings.append(
+            f"goal has unknown status '{status_key}' — skipped"
+        )
+
     return SyncResult(
         path=index_path,
         synced_count=len(goals),
         by_status=by_status,
         changed=changed,
+        added=added,
+        goals=goals,  # I5: caller re-uses this for ordered iteration
         unchanged=unchanged,
         warnings=warnings,
         header_preserved=header_preserved,

@@ -56,7 +56,12 @@ def run_cli(
     the same behavior as before. Accepts an optional `now` parameter for
     freezing time in the subprocess (requires support in cli.py). Accepts
     an optional `cwd` parameter to change the subprocess's working directory
-    (defaults to REPO_ROOT for backwards compatibility)."""
+    (defaults to REPO_ROOT for backwards compatibility).
+
+    To protect the tracked REPO_ROOT/goals/index.md from being overwritten
+    by the auto-trigger fired from CRUD subcommands, each subprocess gets
+    a unique TODO_GOALS_DIR pointing at a tempdir when no cwd is given,
+    or at <cwd>/goals when cwd IS given. The tempdir is cleaned up after."""
     env = os.environ.copy()
     env.pop("TODO_DB_PATH", None)
     env["TODO_DB_PATH"] = str(db_path)
@@ -66,13 +71,31 @@ def run_cli(
         env.pop("TODO_TEST_TIMER_FILE", None)
     if now is not None:
         env["TEST_NOW_DATETIME"] = now.isoformat()
-    return subprocess.run(
-        [sys.executable, str(CLI_SCRIPT), *args],
-        cwd=str(cwd) if cwd is not None else str(REPO_ROOT),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+
+    cleanup_goals_root: Path | None = None
+    if cwd is not None:
+        env["TODO_GOALS_DIR"] = str(cwd / "goals")
+    else:
+        # Default: point the subprocess's GOALS_DIR at an isolated temp
+        # directory. The subprocess's working directory remains REPO_ROOT
+        # so other repo-root-relative paths (config/schedule.json, etc.)
+        # still resolve as before. This temp dir does NOT touch the real
+        # tracked goals/index.md.
+        tmp_goals_root = Path(tempfile.mkdtemp(prefix="cli-test-goals-"))
+        env["TODO_GOALS_DIR"] = str(tmp_goals_root)
+        cleanup_goals_root = tmp_goals_root
+
+    try:
+        return subprocess.run(
+            [sys.executable, str(CLI_SCRIPT), *args],
+            cwd=str(cwd) if cwd is not None else str(REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        if cleanup_goals_root is not None:
+            shutil.rmtree(cleanup_goals_root, ignore_errors=True)
 
 
 # -------------------- status --------------------
@@ -889,6 +912,9 @@ class TestSlotPromptHelpers:
 
 
 # -------------------- rebuild-timers integration tests --------------------
+
+import tempfile
+import shutil
 
 import freezegun
 

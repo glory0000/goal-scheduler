@@ -223,6 +223,35 @@ class TestSyncIndexMd:
         content = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
         assert "[M](missing-md/goal.md)" in content
 
+    def test_warns_when_goal_dir_missing_entirely(self, tmp_path, monkeypatch):
+        """I3: DB has a goal whose goals/<slug>/ directory is entirely absent
+        → warning fires AND the link is still rendered in the index."""
+        # Seed by adding only the DB row (no goals/ dir, no goal.md).
+        import db as _db_mod
+
+        db_path = tmp_path / "todos.db"
+        schema_path = REPO_ROOT / "data" / "schema.sql"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.executescript(schema_path.read_text(encoding="utf-8"))
+            conn.execute(
+                "INSERT INTO goals (slug, name, description, status, "
+                "total_tasks, completed_tasks, created_at, updated_at) "
+                "VALUES (?, ?, '', ?, 0, 0, '2026-08-04T00:00:00', "
+                "'2026-08-04T00:00:00')",
+                ("ghost", "G", "active"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        monkeypatch.setattr(_db_mod, "DB_PATH", str(db_path))
+
+        result = sync_md.sync_index_md(tmp_path / "goals")
+        assert any("ghost" in w for w in result.warnings)
+        # And the link is rendered anyway.
+        content = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
+        assert "[G](ghost/goal.md)" in content
+
     def test_idempotent_and_no_heading_accumulation(self, tmp_path, monkeypatch):
         """Spec §"Idempotency": re-running with no DB change is byte-identical.
 
@@ -252,6 +281,34 @@ class TestSyncIndexMd:
         assert "## 进行中" not in moved
         assert moved.count("## 已暂停") == 1
 
+    def test_warns_on_unknown_status(self, tmp_path, monkeypatch):
+        """M9: a goal with a status outside the three buckets must trigger a
+        warning."""
+        # Seed an active goal so the regular sync works, then push a row
+        # directly into the DB with an unknown status.
+        self._seed_db(
+            tmp_path, monkeypatch,
+            goals=[{"slug": "ok", "name": "OK", "status": "active"}],
+            tasks=[],
+        )
+        conn = sqlite3.connect(str((tmp_path / "todos.db")))
+        try:
+            conn.execute(
+                "INSERT INTO goals (slug, name, description, status, "
+                "total_tasks, completed_tasks, created_at, updated_at) "
+                "VALUES (?, ?, '', ?, 0, 0, '2026-08-04T00:00:00', "
+                "'2026-08-04T00:00:00')",
+                ("weird", "W", "frobnicated"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        result = sync_md.sync_index_md(tmp_path / "goals")
+        assert any("frobnicated" in w and "unknown" in w for w in result.warnings)
+        # It must not appear in the rendered index.
+        content = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
+        assert "[W]" not in content
+
     def test_preserves_user_header_above_generated_sections(
         self, tmp_path, monkeypatch
     ):
@@ -269,6 +326,52 @@ class TestSyncIndexMd:
         content = (goals_dir / "index.md").read_text(encoding="utf-8")
         assert content.startswith("# 目标索引\n\n手写说明。\n")
         assert content.count("## 进行中") == 1
+
+    def test_changed_vs_added_classification(self, tmp_path, monkeypatch):
+        """I4: SyncResult classifies slugs into added (new) vs changed
+        (pre-existing, rendered line differs).
+        """
+        import db
+
+        goals_dir = tmp_path / "goals"
+        self._seed_db(
+            tmp_path, monkeypatch,
+            goals=[{"slug": "a", "name": "A", "status": "active"}],
+            tasks=[],
+        )
+        sync_md.sync_index_md(goals_dir)
+        # 'a' appears in both old and new (no change).
+        r1 = sync_md.sync_index_md(goals_dir)
+        assert r1.added == []
+        assert r1.changed == []
+        # Flip status: 'a' is now in old (active) and new (paused) — that's
+        # a change, not an add.
+        db.update_goal_status("a", "paused")
+        r2 = sync_md.sync_index_md(goals_dir)
+        assert "a" in r2.changed
+        assert "a" not in r2.added
+        # Now create a brand-new goal. It should land in `added`, not `changed`.
+        conn = sqlite3.connect(str((tmp_path / "todos.db")))
+        try:
+            conn.execute(
+                "INSERT INTO goals (slug, name, description, status, "
+                "total_tasks, completed_tasks, created_at, updated_at) "
+                "VALUES (?, ?, '', ?, 0, 0, '2026-08-04T00:00:00', "
+                "'2026-08-04T00:00:00')",
+                ("b", "B", "paused"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        (goals_dir / "b").mkdir(parents=True, exist_ok=True)
+        (goals_dir / "b" / "goal.md").write_text("# B\n", encoding="utf-8")
+        r3 = sync_md.sync_index_md(goals_dir)
+        assert "b" in r3.added
+        assert "b" not in r3.changed
+        # 'a' is unchanged now (the file at r2 already had it as paused).
+        assert "a" in r3.unchanged
+        assert "a" not in r3.added
+        assert "a" not in r3.changed
 
 
 # -------------------- TestSyncMdCli --------------------
@@ -397,6 +500,67 @@ class TestSyncMdCli:
         # Index.md still written.
         assert (tmp_path / "goals" / "index.md").exists()
 
+    def test_json_flag_before_subcommand(self, tmp_path):
+        """Regression for I2: --json BEFORE the subcommand must take effect.
+
+        Previously the sync-md subparser's --json defaulted to False, which
+        overrode the top-level True when dispatch evaluated getattr(parsed,
+        'json', False). Now SUPPRESS keeps the subparser's --json absent
+        unless the flag is actually passed after the subcommand.
+        """
+        db_path = self._seed(
+            tmp_path, goals=[{"slug": "x", "name": "X", "status": "active"}],
+            tasks=[],
+        )
+        result = run_cli(["--json", "sync-md"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert "synced_count" in data
+
+    def test_path_uses_forward_slashes(self, tmp_path):
+        """M10: spec §5.3 shows 'goals/index.md' with forward slashes;
+        Path(...).as_posix() ensures no backslashes regardless of OS."""
+        db_path = self._seed(
+            tmp_path,
+            goals=[{"slug": "foo", "name": "Foo", "status": "active"}],
+            tasks=[],
+        )
+        result = run_cli(["sync-md", "--json"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        # No backslashes anywhere in the path string.
+        assert "\\" not in data["path"]
+        # Path ends in 'goals/index.md' (the forward-slashed suffix).
+        assert data["path"].endswith("goals/index.md")
+        # Human output also uses forward slashes.
+        hr = run_cli(["sync-md"], db_path=db_path, cwd=tmp_path)
+        synced_line = hr.stdout.split("\n")[0]
+        assert "goals/index.md" in synced_line
+        assert "\\" not in synced_line
+
+    def test_tilde_marker_for_status_change(self, tmp_path):
+        """I4: a pre-existing goal whose rendered line differs gets '~' marker,
+        not '+'."""
+        db_path = self._seed(
+            tmp_path,
+            goals=[{"slug": "a", "name": "A", "status": "active"}],
+            tasks=[],
+        )
+        # First run creates the file: 'a' is 'added' → '+'.
+        run_cli(["sync-md"], db_path=db_path, cwd=tmp_path)
+        # Flip status directly in the DB so the next sync sees a change.
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                "UPDATE goals SET status='paused' WHERE slug='a'"
+            )
+            conn.commit()
+        result = run_cli(["sync-md"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        # 'a' must get the '~' marker (line differs from prior file).
+        assert "- ~a" in result.stdout
+        # And not the '+' marker.
+        assert "- +a" not in result.stdout
+
     def test_idempotent_second_run(self, tmp_path):
         db_path = self._seed(
             tmp_path,
@@ -492,4 +656,33 @@ class TestAutosyncIntegration:
         assert result.returncode == 0, result.stderr
         assert "Goal 'x' created." in result.stdout
         assert "warning: sync-md failed:" in result.stderr
+
+    def test_cwd_none_does_not_corrupt_tracked_index(self, tmp_path):
+        """Regression for C1: when run_cli is called without cwd= (its
+        default), the auto-trigger must NOT overwrite the tracked
+        REPO_ROOT/goals/index.md."""
+        # Capture the committed version of goals/index.md via git.
+        tracked = REPO_ROOT / "goals" / "index.md"
+        before = subprocess.run(
+            ["git", "show", "HEAD:goals/index.md"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
+        ).stdout
+
+        db_path = self._seed_db(tmp_path)
+        # Pass cwd=None explicitly (default) to test the legacy code path
+        # that previously corrupted the tracked file.
+        result = run_cli(["goal", "add", "x", "X"], db_path=db_path)
+        assert result.returncode == 0, result.stderr
+        assert "Goal 'x' created." in result.stdout
+
+        # The tracked file must still match the committed version.
+        after = subprocess.run(
+            ["git", "show", "HEAD:goals/index.md"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
+        ).stdout
+        assert after == before
+        # And the on-disk file must not have been modified (Path(tmpfile)
+        # was used; tracked file is unmodified).
+        if tracked.exists():
+            assert tracked.read_text(encoding="utf-8") == before
 

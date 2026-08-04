@@ -26,7 +26,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 import db  # noqa: E402
 import scheduler  # noqa: E402
 from cli_output import format_status_overview, format_today_view, to_json  # noqa: E402
-from sync_md import sync_index_md, compute_completion_pct  # noqa: E402
+from sync_md import sync_index_md, compute_completion_pct, STATUS_LABELS  # noqa: E402
 
 # ---- shared constants ----
 
@@ -38,7 +38,7 @@ DB_UNINIT_HINT = (
     "Run `python scripts/db.py init` first."
 )
 
-GOALS_DIR = Path("goals")  # repo-root-relative; tests pass cwd=tmp_path
+GOALS_DIR = Path(os.environ.get("TODO_GOALS_DIR", "goals"))  # default = repo-root-relative; tests pass cwd=tmp_path
 
 
 # ---- helpers ----
@@ -411,7 +411,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # or after the subcommand (argparse inherits the flag onto the subparser).
     sync_md_parent = argparse.ArgumentParser(add_help=False)
     sync_md_parent.add_argument(
-        "--json", action="store_true",
+        "--json", action="store_true", default=argparse.SUPPRESS,
         help="Emit a single JSON object on stdout",
     )
     sub.add_parser("sync-md",
@@ -820,7 +820,7 @@ def subcommand_sync_md(args, as_json: bool) -> int:
         print(f"warning: {w}", file=sys.stderr)
     if as_json:
         print(to_json({
-            "path": str(result.path),
+            "path": result.path.as_posix(),  # M10: forward slashes
             "synced_count": result.synced_count,
             "by_status": result.by_status,
             "changed": result.changed,
@@ -832,20 +832,40 @@ def subcommand_sync_md(args, as_json: bool) -> int:
         active_n = result.by_status.get("active", 0)
         paused_n = result.by_status.get("paused", 0)
         completed_n = result.by_status.get("completed", 0)
+        # M10: forward slashes in human output.
         print(
-            f"Synced {result.synced_count} goals to {result.path} "
+            f"Synced {result.synced_count} goals to {result.path.as_posix()} "
             f"(active={active_n}, paused={paused_n}, completed={completed_n})"
         )
         # Per-goal lines: "- <marker><slug>  (<label> <pct>%)"
-        # marker is "+" if the slug appears in result.changed, " " otherwise.
+        # I4 marker logic:
+        #   "+" → newly added (slug in result.added)
+        #   "~" → pre-existing but rendered line differs (in result.changed)
+        #   " " → unchanged
+        # I5: mirror the renderer's grouping+sorted-by-slug so the human
+        # summary order matches the file (active→paused→completed, then
+        # slug-sorted within each group).
+        added_set = set(result.added)
         changed_set = set(result.changed)
-        label_map = {"active": "进行中", "paused": "已暂停", "completed": "已完成"}
-        for g in db.list_goals():
-            slug = g["slug"]
-            label = label_map.get(g["status"], g["status"])
-            pct = compute_completion_pct(result.tasks_by_goal.get(slug, []))
-            marker = "+" if slug in changed_set else " "
-            print(f"- {marker}{slug:<16} ({label} {pct}%)")
+        group_order = ["active", "paused", "completed"]
+        grouped = {s: [] for s in group_order}
+        for g in result.goals:
+            if g.get("status") in grouped:
+                grouped[g["status"]].append(g)
+        for status_key in group_order:
+            for g in sorted(grouped[status_key], key=lambda x: x["slug"]):
+                slug = g["slug"]
+                label = STATUS_LABELS.get(g["status"], g["status"])  # M6
+                pct = compute_completion_pct(
+                    result.tasks_by_goal.get(slug, [])
+                )
+                if slug in added_set:
+                    marker = "+"
+                elif slug in changed_set:
+                    marker = "~"
+                else:
+                    marker = " "
+                print(f"- {marker}{slug:<16} ({label} {pct}%)")
     return 0
 
 

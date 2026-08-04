@@ -133,7 +133,7 @@ def _group_and_sort(goals: list[dict]) -> list[list[dict]]:
 
 ### 4.5 Header split algorithm
 
-`scripts/sync_md.py` exposes:
+`scripts/sync_md.py` exposes two pure helpers used by `sync_index_md`:
 
 ```python
 def _split_header(content: str) -> tuple[str, int]:
@@ -143,11 +143,24 @@ def _split_header(content: str) -> tuple[str, int]:
     r"^\\s*-\\s+\\[.*\\]\\(.*/goal\\.md\\)".
     list_line_index is 0-based; len(lines) if no match.
     """
+
+def _strip_generated_headings(header_text: str) -> str:
+    """Truncate header_text at the first generated group heading.
+
+    Idempotency guard: the first sync writes `## 进行中` (etc.) BEFORE the
+    first `- [...]` link line, so `_split_header` would re-include those
+    headings in `header_text` on the next sync and emit them twice.
+    Stripping them at the boundary keeps the user header intact while
+    discarding the regenerated section headings.
+    """
 ```
 
 - Lines are split with `splitlines(keepends=True)` so header byte content is preserved exactly.
 - The detected first list line is **excluded** from `header_text`.
 - Header text is returned with trailing `\n` stripped (so the caller can decide spacing).
+- After splitting, `sync_index_md` runs `_strip_generated_headings` on the header
+  text before passing it to `render_index_md` — the net effect is "keep everything
+  above the first `## 进行中` heading" without any duplication.
 
 ### 4.6 File I/O (`sync_index_md`)
 
