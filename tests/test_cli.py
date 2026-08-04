@@ -9,7 +9,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -44,10 +44,25 @@ def _init_db(db_path: Path) -> None:
         conn.commit()
 
 
-def run_cli(args: list[str], db_path: Path) -> subprocess.CompletedProcess:
+def run_cli(
+    args: list[str],
+    db_path: Path,
+    timer_file: Path | None = None,
+    now: datetime | None = None,
+) -> subprocess.CompletedProcess:
+    """Invoke scripts/cli.py with isolated TODO_DB_PATH and (optionally)
+    TODO_TEST_TIMER_FILE. Existing tests that don't pass timer_file see
+    the same behavior as before. Accepts an optional `now` parameter for
+    freezing time in the subprocess (requires support in cli.py)."""
     env = os.environ.copy()
     env.pop("TODO_DB_PATH", None)
     env["TODO_DB_PATH"] = str(db_path)
+    if timer_file is not None:
+        env["TODO_TEST_TIMER_FILE"] = str(timer_file)
+    else:
+        env.pop("TODO_TEST_TIMER_FILE", None)
+    if now is not None:
+        env["TEST_NOW_DATETIME"] = now.isoformat()
     return subprocess.run(
         [sys.executable, str(CLI_SCRIPT), *args],
         cwd=str(REPO_ROOT),
@@ -868,3 +883,250 @@ class TestSlotPromptHelpers:
         assert prompt.splitlines()[0].startswith("Free slot 启动")
         # First line includes the task_id (parseable by parse_task_id_from_description).
         assert "g1-T001" in prompt.splitlines()[0]
+
+
+# -------------------- rebuild-timers integration tests --------------------
+
+import freezegun
+
+
+def _seed_focus_and_tasks(db_path: Path) -> None:
+    """Insert one active goal with 4 pending tasks so scheduler has work to do.
+
+    4 tasks because a weekday has 4 slots (07:30, 12:00, 18:00, 21:00); with
+    3 tasks the morning 5am test would only get 3 timers, not 4."""
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO goals (slug, name, description, status, "
+            "total_tasks, completed_tasks, created_at, updated_at) "
+            "VALUES ('g1', 'Goal One', '', 'active', 4, 0, "
+            "'2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        for seq, title, hours in [
+            (1, "task one", 1.0),
+            (2, "task two", 1.0),
+            (3, "task three", 1.0),
+            (4, "task four", 1.0),
+        ]:
+            tid = f"g1-T{seq:03d}"
+            conn.execute(
+                "INSERT INTO tasks (id, goal_slug, sequence, title, description, "
+                "estimated_hours, depends_on, status, last_reminded_at, "
+                "completed_at, created_at, updated_at) "
+                f"VALUES ('{tid}', 'g1', {seq}, '{title}', '', {hours}, '[]', "
+                "'pending', NULL, NULL, '2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+            )
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('today_focus', 'g1')"
+        )
+        conn.commit()
+
+
+class TestRebuildTimers:
+    """End-to-end subprocess tests for `python scripts/cli.py rebuild-timers`."""
+
+    def test_rebuild_timers_db_uninitialized(self, tmp_path):
+        db_path = tmp_path / "fresh.db"
+        # Don't init the DB.
+        result = run_cli(["rebuild-timers"], db_path=db_path,
+                         timer_file=tmp_path / "timers.json")
+        assert result.returncode == 2, result.stderr
+        assert "Run `python scripts/db.py init` first" in result.stderr
+        assert result.stdout == ""
+
+    @freezegun.freeze_time("2026-08-04 05:00:00")
+    def test_rebuild_timers_fresh_morning_5am(self, tmp_path):
+        # 2026-08-04 is a Tuesday (weekday): 4 slots.
+        db_path = tmp_path / "db.sqlite"
+        _init_db(db_path)
+        _seed_focus_and_tasks(db_path)
+        timer_file = tmp_path / "timers.json"
+        now = datetime.now()
+
+        result = run_cli(["rebuild-timers"], db_path=db_path, timer_file=timer_file, now=now)
+
+        assert result.returncode == 0, result.stderr
+        timers = json.loads(timer_file.read_text(encoding="utf-8"))
+        assert len(timers) == 4
+        starts = sorted(t["fire_at"][11:16] for t in timers)
+        assert starts == ["07:30", "12:00", "18:00", "21:00"]
+        # Human summary appears on stdout
+        assert "Rebuilt timers for 2026-08-04" in result.stdout
+        assert "added   4" in result.stdout
+
+    @freezegun.freeze_time("2026-08-04 14:00:00")
+    def test_rebuild_timers_partial_day_14pm(self, tmp_path):
+        # 14:00 is after the 12:00 slot. Only 18:00 and 21:00 should be added.
+        db_path = tmp_path / "db.sqlite"
+        _init_db(db_path)
+        _seed_focus_and_tasks(db_path)
+        timer_file = tmp_path / "timers.json"
+        now = datetime.now()
+
+        result = run_cli(["rebuild-timers"], db_path=db_path, timer_file=timer_file, now=now)
+
+        assert result.returncode == 0, result.stderr
+        timers = json.loads(timer_file.read_text(encoding="utf-8"))
+        starts = sorted(t["fire_at"][11:16] for t in timers)
+        assert starts == ["18:00", "21:00"]
+
+    @freezegun.freeze_time("2026-08-04 05:00:00")
+    def test_rebuild_timers_idempotent(self, tmp_path):
+        db_path = tmp_path / "db.sqlite"
+        _init_db(db_path)
+        _seed_focus_and_tasks(db_path)
+        timer_file = tmp_path / "timers.json"
+        now = datetime.now()
+
+        first = run_cli(["rebuild-timers"], db_path=db_path, timer_file=timer_file, now=now)
+        assert first.returncode == 0
+        n_after_first = len(json.loads(timer_file.read_text(encoding="utf-8")))
+
+        second = run_cli(["rebuild-timers"], db_path=db_path, timer_file=timer_file, now=now)
+        assert second.returncode == 0, second.stderr
+        n_after_second = len(json.loads(timer_file.read_text(encoding="utf-8")))
+        assert n_after_first == n_after_second == 4
+        # Second-run stdout should report added=0 removed=0 kept=4
+        assert "added   0" in second.stdout
+        assert "removed 0" in second.stdout
+        assert "kept    4" in second.stdout
+
+    @freezegun.freeze_time("2026-08-04 05:00:00")
+    def test_rebuild_timers_no_focus(self, tmp_path):
+        db_path = tmp_path / "db.sqlite"
+        _init_db(db_path)
+        # Seed a goal but no focus setting.
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                "INSERT INTO goals (slug, name, description, status, "
+                "total_tasks, completed_tasks, created_at, updated_at) "
+                "VALUES ('g1', 'G1', '', 'active', 0, 0, "
+                "'2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+            )
+            conn.commit()
+        timer_file = tmp_path / "timers.json"
+        now = datetime.now()
+
+        result = run_cli(["rebuild-timers"], db_path=db_path, timer_file=timer_file, now=now)
+
+        assert result.returncode == 0, result.stderr
+        assert "no focus set" in result.stdout
+        assert not timer_file.exists() or json.loads(
+            timer_file.read_text(encoding="utf-8") or "[]"
+        ) == []
+
+    @freezegun.freeze_time("2026-08-04 22:00:00")
+    def test_rebuild_timers_late_night_22pm(self, tmp_path):
+        # 22:00 is after the last slot (21:00-23:00). No remaining slots.
+        db_path = tmp_path / "db.sqlite"
+        _init_db(db_path)
+        _seed_focus_and_tasks(db_path)
+        timer_file = tmp_path / "timers.json"
+        now = datetime.now()
+
+        result = run_cli(["rebuild-timers"], db_path=db_path, timer_file=timer_file, now=now)
+
+        assert result.returncode == 0, result.stderr
+        assert "no remaining slots today" in result.stdout
+        if timer_file.exists():
+            timers = json.loads(timer_file.read_text(encoding="utf-8") or "[]")
+            assert timers == []
+        else:
+            # If the file doesn't exist, that's also acceptable
+            pass
+
+    @freezegun.freeze_time("2026-08-04 05:00:00")
+    def test_rebuild_timers_json_output(self, tmp_path):
+        db_path = tmp_path / "db.sqlite"
+        _init_db(db_path)
+        _seed_focus_and_tasks(db_path)
+        timer_file = tmp_path / "timers.json"
+        now = datetime.now()
+
+        result = run_cli(
+            ["--json", "rebuild-timers"], db_path=db_path, timer_file=timer_file, now=now
+        )
+
+        assert result.returncode == 0, result.stderr
+        # stderr is silent on success
+        assert result.stderr == ""
+        payload = json.loads(result.stdout)
+        assert payload["date"] == "2026-08-04"
+        assert payload["summary"] == {"added": 4, "removed": 0, "kept": 0, "ignored": 0}
+        assert len(payload["added"]) == 4
+        assert payload["removed"] == []
+        assert payload["ignored_foreign"] == []
+
+    @freezegun.freeze_time("2026-08-04 14:00:00")
+    def test_rebuild_timers_stale_timer_removed(self, tmp_path):
+        """If the timer file already has a 18:00 timer for an old task (T099)
+        and the DB's 18:00 plan now resolves to T001, the old timer is removed
+        and a new one is added."""
+        db_path = tmp_path / "db.sqlite"
+        _init_db(db_path)
+        _seed_focus_and_tasks(db_path)
+        timer_file = tmp_path / "timers.json"
+        # Pre-seed: 18:00 timer for stale task T099, plus 21:00 timer for T002
+        # (still matches the planner's choice for 21:00 at 14pm). Both must
+        # have task_id-encoded descriptions so the (slot_start, task_id) diff
+        # recognizes them.
+        timer_file.write_text(json.dumps([
+            {
+                "id": "test-old-18",
+                "fire_at": "2026-08-04T18:00:00+08:00",
+                "description": "Todo scheduler: 2026-08-04 18:00 evening - g1-T099",
+            },
+            {
+                "id": "test-21",
+                "fire_at": "2026-08-04T21:00:00+08:00",
+                "description": "Todo scheduler: 2026-08-04 21:00 night - g1-T002",
+            },
+        ], ensure_ascii=False, indent=2), encoding="utf-8")
+        now = datetime.now()
+
+        result = run_cli(["rebuild-timers"], db_path=db_path, timer_file=timer_file, now=now)
+
+        assert result.returncode == 0, result.stderr
+        timers = json.loads(timer_file.read_text(encoding="utf-8"))
+        # 21:00 was kept (slot_start + task_id T002 still in plan). 18:00 was
+        # removed (stale T099) and re-added with a new id for T001; the
+        # test-old-18 id should be gone.
+        ids = {t["id"] for t in timers}
+        assert "test-old-18" not in ids
+        # 21:00 still present
+        assert "test-21" in ids
+        # 18:00 still present (just a different id, now for T001)
+        starts = sorted(t["fire_at"][11:16] for t in timers)
+        assert starts == ["18:00", "21:00"]
+        # Stdout reports 1 removed + 1 added
+        assert "removed 1" in result.stdout
+        assert "added   1" in result.stdout
+
+    @freezegun.freeze_time("2026-08-04 14:00:00")
+    def test_rebuild_timers_only_manages_own_timers(self, tmp_path):
+        """A foreign timer (description not 'Todo scheduler: ...') is left
+        untouched even if it falls in today's window."""
+        db_path = tmp_path / "db.sqlite"
+        _init_db(db_path)
+        _seed_focus_and_tasks(db_path)
+        timer_file = tmp_path / "timers.json"
+        timer_file.write_text(json.dumps([
+            {
+                "id": "foreign-1",
+                "fire_at": "2026-08-04T20:00:00+08:00",
+                "description": "User manual reminder",
+            },
+        ], ensure_ascii=False, indent=2), encoding="utf-8")
+        now = datetime.now()
+
+        result = run_cli(["rebuild-timers"], db_path=db_path, timer_file=timer_file, now=now)
+
+        assert result.returncode == 0, result.stderr
+        timers = json.loads(timer_file.read_text(encoding="utf-8"))
+        ids = {t["id"] for t in timers}
+        assert "foreign-1" in ids  # untouched
+        # The two scheduled slots (18:00, 21:00) were also added.
+        assert len(timers) == 3
+        # Stdout mentions the foreign timer was ignored
+        assert "ignored" in result.stdout
+        assert "User manual reminder" in result.stdout

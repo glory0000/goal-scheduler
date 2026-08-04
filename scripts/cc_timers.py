@@ -198,7 +198,12 @@ def list_today_remaining(today: str) -> tuple[list[dict], list[dict]]:
     date prefix matches. A timer is "remaining" if its fire_at
     datetime is strictly after `datetime.now()`.
     """
-    now = datetime.now().astimezone()
+    import os
+    test_now_str = os.environ.get("TEST_NOW_DATETIME")
+    if test_now_str:
+        now = datetime.fromisoformat(test_now_str).astimezone()
+    else:
+        now = datetime.now().astimezone()
     own: list[dict] = []
     foreign: list[dict] = []
     for t in list_all():

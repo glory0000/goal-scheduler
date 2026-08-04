@@ -365,6 +365,9 @@ def _build_parser() -> argparse.ArgumentParser:
     tu.add_argument("task_id")
     tu.add_argument("status")
 
+    sub.add_parser("rebuild-timers",
+                   help="Reconcile today's planned timers with cc-connect")
+
     focus_p = sub.add_parser("focus", help="Today's focus")
     focus_sub = focus_p.add_subparsers(dest="focus_command", required=True)
     fs = focus_sub.add_parser("set", help="Set today's focus")
@@ -394,6 +397,8 @@ def run(args: list[str]) -> int:
             return subcommand_task_add(parsed, as_json)
         if parsed.command == "task" and parsed.task_command == "update":
             return subcommand_task_update(parsed, as_json)
+        if parsed.command == "rebuild-timers":
+            return subcommand_rebuild_timers(parsed, as_json)
         if parsed.command == "focus":
             return subcommand_focus(parsed, as_json)
     except NotImplementedError as exc:
@@ -570,6 +575,180 @@ def _fmt_added(entry: dict) -> str:
     label = entry.get("slot_label", "")
     tid = entry.get("task_id", "")
     return f"{entry['slot_start']} {label} → {tid}"
+
+
+# ---- rebuild-timers ----
+
+def subcommand_rebuild_timers(args, as_json: bool) -> int:
+    """Reconcile today's planned reminder timers with cc-connect's state.
+
+    See spec §4 for the algorithm. Pure reads up front, then writes via
+    cc_timers (removals first, then adds). All errors exit 1/2 with stderr."""
+    import cc_timers  # local import keeps cli.py importable without cc_timers
+    import os
+
+    # For testing: allow overriding now via an environment variable
+    test_now_str = os.environ.get("TEST_NOW_DATETIME")
+    if test_now_str:
+        from datetime import timezone
+        now = datetime.fromisoformat(test_now_str).astimezone()
+    else:
+        now = datetime.now().astimezone()
+
+    today = now.date().isoformat()
+    now_hhmm = now.strftime("%H:%M")
+    focus = db.get_today_focus()
+
+    if focus is None:
+        # No focus → no timers. Normal state, not an error.
+        if as_json:
+            print(to_json({
+                "date": today,
+                "added": [], "removed": [], "kept": [],
+                "ignored_foreign": [],
+                "summary": {"added": 0, "removed": 0, "kept": 0, "ignored": 0},
+                "note": "no focus set",
+            }))
+        else:
+            print(format_rebuild_summary(
+                today, [], [], [], [],
+                no_focus=True,
+            ))
+        return 0
+
+    all_slots = scheduler.get_slots_for_date(today)
+    try:
+        # One call lets the scheduler hand out distinct tasks across all of
+        # today's remaining slots (it keeps a local used_task_ids set per call).
+        plan = scheduler.compute_schedule(
+            focus, today, now_hhmm, max_slots=len(all_slots),
+        )
+    except Exception as exc:
+        _emit_error(f"Error: scheduler.compute_schedule failed: {exc}", code=2)
+
+    slots_by_start = {s["start"]: s for s in all_slots}
+    planned: list[dict] = []
+    for entry in plan:
+        if entry["slot_start"] <= now_hhmm:
+            continue  # past slot
+        slot = slots_by_start.get(entry["slot_start"])
+        if slot is None:
+            continue  # safety; should not happen
+        planned.append({
+            "date": today,
+            "slot_start": entry["slot_start"],
+            "slot_end": entry["slot_end"],
+            "slot_label": slot["label"],
+            "task_id": entry["task_id"],
+            "goal_slug": entry["goal_slug"],
+        })
+
+    if not planned:
+        # All slots are in the past, or none have tasks. Exit 0 with a
+        # short message; no cc-connect writes.
+        if as_json:
+            print(to_json({
+                "date": today,
+                "added": [], "removed": [], "kept": [],
+                "ignored_foreign": [],
+                "summary": {"added": 0, "removed": 0, "kept": 0, "ignored": 0},
+                "note": "no remaining slots today",
+            }))
+        else:
+            print(format_rebuild_summary(
+                today, [], [], [], [],
+                today_had_no_slots=True,
+            ))
+        return 0
+
+    own, foreign = cc_timers.list_today_remaining(today)
+    actual: list[dict] = []
+    for t in own:
+        actual.append({
+            **t,
+            "slot_start": parse_slot_start_from_description(t["description"]),
+            "task_id": parse_task_id_from_description(t["description"]),
+        })
+
+    diff = reconcile_timers(planned, actual)
+
+    # Apply: removals first, then adds. If a single op fails we continue
+    # and collect failures to surface at the end.
+    apply_failures: list[str] = []
+    for entry in diff["to_remove"]:
+        try:
+            cc_timers.delete(entry["id"])
+        except Exception as exc:
+            apply_failures.append(
+                f"failed to delete {entry['id']} ({entry.get('slot_start')}): {exc}"
+            )
+    for entry in diff["to_add"]:
+        try:
+            prompt = build_slot_prompt(
+                entry["date"], entry["slot_start"], entry["slot_end"],
+                entry["slot_label"], entry["task_id"],
+            )
+            description = build_slot_description(
+                entry["date"], entry["slot_start"], entry["slot_label"],
+                entry["task_id"],
+            )
+            fire_at = f"{entry['date']}T{entry['slot_start']}:00+08:00"
+            cc_timers.add(prompt, fire_at, description=description)
+        except Exception as exc:
+            apply_failures.append(
+                f"failed to add {entry['slot_start']} ({entry.get('task_id')}): {exc}"
+            )
+
+    if apply_failures:
+        for msg in apply_failures:
+            print(f"Error: {msg}", file=sys.stderr)
+        _emit_error(
+            f"rebuild-timers: {len(apply_failures)} operation(s) failed; "
+            "see stderr for details",
+            code=2,
+        )
+        # _emit_error calls sys.exit, so we never reach here.
+
+    kept = [a for a in actual if a not in diff["to_remove"]]
+    if as_json:
+        print(to_json({
+            "date": today,
+            "added": [
+                {
+                    "slot_start": p["slot_start"],
+                    "slot_end": p["slot_end"],
+                    "slot_label": p["slot_label"],
+                    "task_id": p["task_id"],
+                    "goal_slug": p["goal_slug"],
+                }
+                for p in diff["to_add"]
+            ],
+            "removed": [
+                {"id": r["id"], "slot_start": r.get("slot_start"),
+                 "task_id": r.get("task_id")}
+                for r in diff["to_remove"]
+            ],
+            "kept": [
+                {"id": k["id"], "slot_start": k.get("slot_start"),
+                 "task_id": k.get("task_id")}
+                for k in kept
+            ],
+            "ignored_foreign": [
+                {"id": f["id"], "description": f.get("description")}
+                for f in foreign
+            ],
+            "summary": {
+                "added": len(diff["to_add"]),
+                "removed": len(diff["to_remove"]),
+                "kept": len(kept),
+                "ignored": len(foreign),
+            },
+        }))
+    else:
+        print(format_rebuild_summary(
+            today, diff["to_add"], diff["to_remove"], kept, foreign,
+        ))
+    return 0
 
 
 def main() -> None:

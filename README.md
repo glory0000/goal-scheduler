@@ -76,6 +76,16 @@ python scripts/cli.py task update a-stock-quant-T013 done
 # Change today's focus
 python scripts/cli.py focus set a-stock-quant
 python scripts/cli.py focus clear
+
+# Rebuild today's reminder timers
+python scripts/cli.py rebuild-timers
+# Output: Rebuilt timers for 2026-08-04:
+#           added   2  (18:00 evening → T002, 21:00 night → T003)
+#           removed 0
+#           kept    0
+
+python scripts/cli.py rebuild-timers --json
+# Output: {"date": "2026-08-04", "added": [...], ...}
 ```
 
 Exit codes: `0` success, `1` input error, `2` database not initialized,
