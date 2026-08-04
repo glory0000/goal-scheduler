@@ -292,7 +292,39 @@ def subcommand_task_update(args, as_json: bool) -> int:
 
 
 def subcommand_focus(args, as_json: bool) -> int:
-    raise NotImplementedError("not yet implemented")
+    if args.focus_command == "set":
+        _validate_slug(args.slug)
+        if db.get_goal(args.slug) is None:
+            _emit_error(f"Goal '{args.slug}' not found.", code=3)
+        current = db.get_today_focus()
+        if current == args.slug:
+            if as_json:
+                print(to_json({"focus": current}))
+            else:
+                print(f"Focus already '{current}' (no change).")
+            return 0
+        db.set_today_focus(args.slug)
+        if as_json:
+            print(to_json({"focus": args.slug}))
+        else:
+            print(f"Focus set to '{args.slug}'.")
+        return 0
+    if args.focus_command == "clear":
+        current = db.get_today_focus()
+        if current is None:
+            if as_json:
+                print(to_json({"focus": None}))
+            else:
+                print("Focus already unset (no change).")
+            return 0
+        db.set_today_focus(None)
+        if as_json:
+            print(to_json({"focus": None}))
+        else:
+            print("Focus cleared.")
+        return 0
+    _emit_error("Error: focus subcommand required.", code=1)
+    return 1  # unreachable
 
 
 # ---- parser ----

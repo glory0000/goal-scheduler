@@ -53,6 +53,34 @@ bash scripts/simulate_reminder.sh "2026-08-04 21:00"
 bash scripts/break_session.sh
 ```
 
+### CLI
+
+The unified Python CLI is a thin wrapper over `scripts/db.py` and
+`scripts/scheduler.py`. It is what Claude and the user call to read or
+change state. Output is human-readable by default; add `--json` for a
+single parseable JSON object on stdout. All errors go to stderr.
+
+```bash
+# View state
+python scripts/cli.py status
+python scripts/cli.py today
+
+# Add a goal / task
+python scripts/cli.py goal add a-stock-quant "A股量化" --description "策略回测与实盘"
+python scripts/cli.py task add a-stock-quant-T013 a-stock-quant 13 "跑通回测示例" --hours 1.0
+
+# Update progress
+python scripts/cli.py task update a-stock-quant-T013 in_progress
+python scripts/cli.py task update a-stock-quant-T013 done
+
+# Change today's focus
+python scripts/cli.py focus set a-stock-quant
+python scripts/cli.py focus clear
+```
+
+Exit codes: `0` success, `1` input error, `2` database not initialized,
+`3` resource not found.
+
 ## Fallback cron
 
 The system relies on a single cc-connect cron to rebuild broken timer chains. Verify with:

@@ -599,3 +599,58 @@ def test_task_update_task_not_found(tmp_path):
     assert result.returncode == 3
     assert "not found" in result.stderr or "T999" in result.stderr
     assert result.stdout == ""
+
+
+# -------------------- focus --------------------
+
+def test_focus_set(tmp_path):
+    db_path = tmp_path / "todos.db"
+    _init_db(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO goals (slug, name, description, status, "
+            "total_tasks, completed_tasks, created_at, updated_at) "
+            "VALUES ('a-stock-quant', 'A股量化', '', 'active', "
+            "0, 0, '2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.commit()
+
+    result = run_cli(["focus", "set", "a-stock-quant"], db_path=db_path)
+
+    assert result.returncode == 0, result.stderr
+    with sqlite3.connect(str(db_path)) as conn:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key='today_focus'"
+        ).fetchone()
+    assert row[0] == "a-stock-quant"
+
+
+def test_focus_clear(tmp_path):
+    db_path = tmp_path / "todos.db"
+    _init_db(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES "
+            "('today_focus', 'a-stock-quant')"
+        )
+        conn.commit()
+
+    result = run_cli(["focus", "clear"], db_path=db_path)
+
+    assert result.returncode == 0, result.stderr
+    with sqlite3.connect(str(db_path)) as conn:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key='today_focus'"
+        ).fetchone()
+    assert row is None
+
+
+def test_focus_clear_when_already_empty(tmp_path):
+    """focus clear with no focus set is a no-op, exit 0, no DB change."""
+    db_path = tmp_path / "todos.db"
+    _init_db(db_path)
+
+    result = run_cli(["focus", "clear"], db_path=db_path)
+
+    assert result.returncode == 0
+    assert "no change" in result.stdout.lower() or "Focus cleared" in result.stdout
