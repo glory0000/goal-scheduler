@@ -328,7 +328,7 @@ def sync_index_md(goals_root: Path) -> SyncResult:
     # buckets). `_group_and_sort` silently drops them from the rendered
     # list and the by_status dict above, so without this warning the
     # user sees `synced_count=N` but the rendered index has fewer rows.
-    known_statuses = set(_GROUP_ORDER)
+    known_statuses = set(_GROUP_ORDER) | {"archived"}
     unknown_statuses = sorted({g.get("status") for g in goals} - known_statuses)
     for status_key in unknown_statuses:
         if status_key is None:

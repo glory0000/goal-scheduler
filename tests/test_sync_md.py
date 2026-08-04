@@ -767,6 +767,19 @@ class TestArchivedGoalInSync:
         index = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
         assert "[X](x/goal.md)" in index
 
+    def test_archived_status_not_reported_as_unknown(self, tmp_path, monkeypatch):
+        """'archived' is a known status — M9 must not warn about it.
+
+        Regression: the M9 check compared against _GROUP_ORDER only, so every
+        archived goal emitted a spurious "unknown status 'archived'" warning.
+        """
+        self._seed_db(tmp_path, monkeypatch, [
+            {"slug": "alive", "name": "A", "status": "active"},
+            {"slug": "dead", "name": "D", "status": "archived"},
+        ])
+        result = sync_md.sync_index_md(tmp_path / "goals")
+        assert "unknown status" not in str(result.warnings)
+
     def test_archived_with_missing_goal_md_no_warning(self, tmp_path, monkeypatch):
         """An archived goal whose goal.md is missing must NOT trigger the warning."""
         import db
