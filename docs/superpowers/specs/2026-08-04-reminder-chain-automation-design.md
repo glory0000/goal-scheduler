@@ -61,28 +61,39 @@ cron 5am  ──►  scripts/cli.py rebuild-timers
 ### 4.1 Build the planned set
 
 ```python
-now      = datetime.now().local()
-today    = now.date().isoformat()
-focus    = db.get_today_focus()
+now       = datetime.now().astimezone()
+today     = now.date().isoformat()
+now_hhmm  = now.strftime("%H:%M")
+focus     = db.get_today_focus()
 all_slots = schedule.for_date(today)   # from config/schedule.json
-planned  = []
-for slot in all_slots:
-    if slot.start_time <= now:                    # past slot → skip
-        continue
-    next_one = scheduler.compute_schedule(
-        focus, today, slot.start_time, max_slots=1
-    )                                            # one slot at a time
-    if not next_one:                              # empty slot → skip
-        continue
-    planned.append({
-        "slot_start": slot.start_time,
-        "slot_end":   slot.end_time,
-        "task_id":    next_one[0]["task_id"],
-        "goal_slug":  next_one[0]["goal_slug"],
-    })
+
+if focus is None:
+    planned = []  # caller exits 0 with "no focus set" before scheduling
+else:
+    # Single call — scheduler.compute_schedule already tracks used_task_ids
+    # internally across multiple slots in one invocation, so we get the
+    # correct per-slot assignment without manual dedup.
+    plan = scheduler.compute_schedule(
+        focus, today, now_hhmm, max_slots=len(all_slots),
+    )
+    slots_by_start = {s["start"]: s for s in all_slots}
+    planned = []
+    for entry in plan:
+        if entry["slot_start"] <= now_hhmm:           # past slot — skip
+            continue
+        slot = slots_by_start.get(entry["slot_start"])
+        if slot is None:                              # unknown slot — skip
+            continue
+        planned.append({
+            "slot_start": entry["slot_start"],
+            "slot_end":   entry["slot_end"],
+            "slot_label": slot["label"],
+            "task_id":    entry["task_id"],
+            "goal_slug":  entry["goal_slug"],
+        })
 ```
 
-**Key simplification:** each slot asks `compute_schedule` independently with `max_slots=1`. Slots don't chain — if the 12:00 slot has no task, it doesn't block 18:00 from having one. This decouples `rebuild-timers` from `config/schedule.json`'s exact slot list.
+**Key simplification:** the scheduler's per-invocation `used_task_ids` set already handles dedup across multiple slots. One `compute_schedule` call with `max_slots=len(slots)` is the correct shape — per-slot `max_slots=1` calls would re-pick the same task because each call has a fresh empty set.
 
 ### 4.2 Read the actual set
 
@@ -96,15 +107,21 @@ Timers that don't match these criteria are returned in a separate `foreign` list
 ### 4.3 Diff and apply
 
 ```python
-def reconcile_timers(planned, actual, now) -> dict:
-    planned_keys = {(p["slot_start"],) for p in planned}
-    actual_keys  = {(a["slot_start"],) for a in actual}
-    to_add    = [p for p in planned if (p["slot_start"],) not in actual_keys]
-    to_remove = [a for a in actual  if (a["slot_start"],) not in planned_keys]
+def reconcile_timers(planned, actual) -> dict:
+    planned_keys = {(p["slot_start"], p["task_id"]) for p in planned}
+    actual_keys  = {(a["slot_start"],  a["task_id"])  for a in actual
+                    if a.get("slot_start") is not None
+                    and a.get("task_id") is not None}
+    to_add    = [p for p in planned
+                 if (p["slot_start"], p["task_id"]) not in actual_keys]
+    to_remove = [a for a in actual
+                 if a.get("slot_start") is not None
+                 and a.get("task_id") is not None
+                 and (a["slot_start"], a["task_id"]) not in planned_keys]
     return {"to_add": to_add, "to_remove": to_remove}
 ```
 
-Matching key: `slot_start` only. The description's slot time is authoritative — two timers at the same `slot_start` are the same logical timer even if the rest of the description differs.
+**Matching key:** `(slot_start, task_id)` tuple. The timer description encodes both pieces (see §4.5). Two timers at the same slot but different tasks are treated as different — a stale task gets its old timer removed and a new one added. This is what makes the "mid-day focus change" use case work: if a focus change causes a different task to fill a slot, the old timer is correctly identified as stale even though the slot itself is unchanged. Foreign timers (description not in our format) and pre-Findings-2 legacy timers (description without task_id) are ignored by the diff — the caller keeps them.
 
 **Application order:** removals first, then adds. This minimizes the "partially-applied" state if a `cc_timers.add` or `.del` call fails mid-flight: at worst we have one fewer timer than expected, never an extra orphan.
 
@@ -133,12 +150,12 @@ Rebuilt timers for 2026-08-04:
 }
 ```
 
-### 4.5 Timer prompt format
+### 4.5 Timer prompt and description format
 
-Each added timer uses the same prompt format the cron currently uses for per-slot triggers:
+Each added timer uses the same prompt format the cron currently uses for per-slot triggers, with `task_id` appended to the first line so the description encodes the task:
 
 ```
-Free slot 启动: <date> <slot_start> <slot_label> (<slot_start>-<slot_end>).
+Free slot 启动: <date> <slot_start> <slot_label> (<slot_start>-<slot_end>) - <task_id>.
 
 Send a Feishu reminder for the next pending task. Steps:
 1. cd to <repo_root>
@@ -151,7 +168,22 @@ Send a Feishu reminder for the next pending task. Steps:
 Your reply IS the Feishu message to send. Reply in Chinese.
 ```
 
-This template is moved from the cron's `--prompt` field into a `build_slot_prompt(date, slot)` function in `scripts/cli.py`. The per-slot runtime flow is unchanged — Claude still gets the same prompt and walks the same 6 steps. Only the *generator* of the prompt changes (cron → Python function).
+**Timer description (the value cc-connect stores as the timer's user-visible description):**
+
+```
+Todo scheduler: <date> <slot_start> <slot_label> - <task_id>
+```
+
+Example: `Todo scheduler: 2026-08-04 18:00 evening - g1-T002`. Two parse functions recover the pieces:
+
+- `parse_slot_start_from_description(desc) -> "HH:MM" | None` — used to filter foreign timers (any description not matching this format is foreign).
+- `parse_task_id_from_description(desc) -> "T<id>" | None` — used by the diff to match `(slot_start, task_id)` tuples.
+
+**Pre-Item-2 legacy timers** (created by the old natural-language cron, description like `Todo scheduler: 2026-08-04 12:00 lunch` without `- <task_id>`) parse slot_start successfully but return `None` for task_id. They are excluded from the diff (the reconcile function only matches entries with both fields present), so legacy timers stay in cc-connect until they fire naturally and self-archive. After Item 2 ships, all newly-added timers have task_id encoded, so the diff operates normally on them.
+
+**Production cron** passes both `--prompt` (the multi-line text above) and `--desc` (the `Todo scheduler: ...` string) to `cc-connect timer add`. The test backend stores the same `description` field that production would expose via `cc-connect timer list`.
+
+The prompt template is moved from the cron's `--prompt` field into a `build_slot_prompt(date, slot, task_id)` function in `scripts/cli.py`. The per-slot runtime flow is unchanged — Claude still gets the same prompt and walks the same 6 steps. Only the *generator* of the prompt and description changes (cron → Python function).
 
 ## 5. Error Handling
 
@@ -244,10 +276,10 @@ Import `reconcile_timers` directly from `scripts.cli`, call with synthetic input
 | `test_rebuild_timers_no_focus` | focus=None | exit 0, stdout contains "no focus set", timer file empty |
 | `test_rebuild_timers_late_night_22pm` | now=22:00 | exit 0, stdout "no remaining slots today" |
 | `test_rebuild_timers_json_output` | run with `--json` | stdout is `json.loads`-parseable, has `date, added, removed, kept, ignored_foreign, summary` |
-| `test_rebuild_timers_stale_timer_removed` | timer file has 18:00 for old task T005, DB now has T006 at 18:00 | exit 0, removed=1 (T005), added=1 (T006) |
+| `test_rebuild_timers_stale_timer_removed` | timer file has 18:00 for old task T005, DB now has T001 at 18:00 (T001, T002 exist but 21:00 is not pre-seeded) | exit 0, removed=1 (T005), added=2 (T001, T002); the old 18:00 timer id is gone |
 | `test_rebuild_timers_only_manages_own_timers` | timer file has a "User manual timer" alongside a `Todo scheduler` timer | exit 0, the foreign timer survives; stdout mentions "ignored 1 foreign" |
 
-**Total new tests:** ~15 (6 unit + 9 integration). Existing 93 + 15 = ~108. Pre-existing tests in `test_cli.py` and `test_migrate.py` continue to pass unchanged.
+**Total new tests:** ~19 (10 unit + 9 integration). Existing 93 + 19 = ~112. Pre-existing tests in `test_cli.py` and `test_migrate.py` continue to pass unchanged.
 
 **Manual smoke test checklist** (run after the test suite passes):
 1. `python scripts/cli.py rebuild-timers` at any time → see summary printed.
@@ -288,5 +320,5 @@ Import `reconcile_timers` directly from `scripts.cli`, call with synthetic input
 8. The daily cron `5 0 * * *` is updated: its prompt is the single command `python scripts/cli.py rebuild-timers`. The cron's session-mode and other parameters are unchanged.
 9. On an uninitialized DB, `rebuild-timers` exits 2 and prints one line on stderr containing "Run `python scripts/db.py init` first". No cc-connect writes occur.
 10. If `config/schedule.json` is missing or malformed (e.g., `TODO_SCHEDULE_FILE` env var points to a bad path), `rebuild-timers` exits 1 and prints a clear error on stderr. No cc-connect writes occur.
-11. `python -m pytest -q` reports 108/108 (93 prior + ~15 new: 6 unit + 9 integration).
-12. The only files modified or created are: `scripts/cli.py` (add `rebuild-timers` subcommand + helpers), `scripts/cc_timers.py` (new), `tests/test_cli.py` (add `TestRebuildTimers` class), `requirements-dev.txt` or equivalent (add `freezegun`), and the cron registration command (one-liner to update the prompt).
+11. `python -m pytest -q` reports 112/112 (93 prior + ~19 new: 10 unit + 9 integration).
+12. The only files modified or created are: `scripts/cli.py` (add `rebuild-timers` subcommand + helpers including `parse_task_id_from_description`), `scripts/cc_timers.py` (new), `tests/test_cli.py` (add `TestReconcileTimers`, `TestSlotPromptHelpers`, `TestRebuildTimers` classes), `requirements-dev.txt` or equivalent (add `freezegun`), and the cron registration command (one-liner to update the prompt).
