@@ -471,3 +471,25 @@ class TestAutosyncIntegration:
         # 1 of 2 done = 50%
         assert "完成率 50%" in index
 
+    def test_sync_failure_does_not_block_caller(self, tmp_path):
+        """A sync-md failure inside _autosync_index_md must not propagate.
+
+        Forces sync_index_md to raise by pre-placing a regular file at
+        the goals/ path: sync_index_md does `goals_root.mkdir(...)` first,
+        which raises FileExistsError (an OSError subclass) when the path
+        is a file. _autosync_index_md must catch the exception, log a
+        warning to stderr, and let the subcommand return 0.
+        """
+        db_path = self._seed_db(tmp_path)
+        # Force sync_index_md to fail: place a regular file where it
+        # expects a directory.
+        (tmp_path / "goals").write_text("not a directory", encoding="utf-8")
+
+        result = run_cli(
+            ["goal", "add", "x", "X"],
+            db_path=db_path, cwd=tmp_path,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "Goal 'x' created." in result.stdout
+        assert "warning: sync-md failed:" in result.stderr
+

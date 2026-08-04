@@ -38,19 +38,37 @@ DB_UNINIT_HINT = (
     "Run `python scripts/db.py init` first."
 )
 
+GOALS_DIR = Path("goals")  # repo-root-relative; tests pass cwd=tmp_path
+
 
 # ---- helpers ----
 
+def _db_is_initialized(conn: sqlite3.Connection | None = None) -> bool:
+    """Return True iff the `schema_version` table exists.
+
+    When `conn` is None, opens its own connection via `db.get_conn()`
+    and closes it. Used by both the user-facing
+    `_require_initialized_db()` guard and the silent
+    `_autosync_index_md()` no-op path. The helper exists because some
+    test/embedded paths reach `_autosync_index_md()` without an
+    initialized DB; without this, the helper would raise on every
+    CLI call in those paths.
+    """
+    if conn is None:
+        with db.get_conn() as probe_conn:
+            return _db_is_initialized(probe_conn)
+    row = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='schema_version'"
+    ).fetchone()
+    return row is not None
+
+
 def _require_initialized_db() -> None:
-    """Exit 2 with the init hint if schema_version is absent."""
+    """Exit 2 with the standard init hint unless the DB is initialized."""
     try:
-        with db.get_conn() as conn:
-            row = conn.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name='schema_version'"
-            ).fetchone()
-            if row is None:
-                _emit_error(DB_UNINIT_HINT, code=2)
+        if not _db_is_initialized():
+            _emit_error(DB_UNINIT_HINT, code=2)
     except sqlite3.DatabaseError as exc:
         _emit_error(f"Error: database error: {exc}", code=2)
 
@@ -60,21 +78,14 @@ def _autosync_index_md() -> None:
 
     Captures all exceptions and writes them to stderr. Never raises,
     never exits. The calling subcommand has already succeeded; sync
-    failure must not roll back the user's operation.
-
-    On a DB-uninitialized error, silently does nothing (the calling
-    subcommand already exited 2 before reaching us).
+    failure must not roll back the user's operation. Silently no-ops
+    when the DB is not initialized (some test paths reach here without
+    a schema_version table).
     """
     try:
-        # Skip silently if schema_version is absent.
-        with db.get_conn() as conn:
-            row = conn.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name='schema_version'"
-            ).fetchone()
-            if row is None:
-                return
-        sync_index_md(Path("goals"))
+        if not _db_is_initialized():
+            return
+        sync_index_md(GOALS_DIR)
     except Exception as exc:
         print(f"warning: sync-md failed: {exc}", file=sys.stderr)
 
@@ -804,7 +815,7 @@ def subcommand_sync_md(args, as_json: bool) -> int:
     Always full-sync (no --goal filter in v1). Atomic write; warnings
     (orphan dirs, missing goal.md) go to stderr but do not block exit 0.
     """
-    result = sync_index_md(Path("goals"))
+    result = sync_index_md(GOALS_DIR)
     for w in result.warnings:
         print(f"warning: {w}", file=sys.stderr)
     if as_json:

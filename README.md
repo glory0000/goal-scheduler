@@ -89,9 +89,8 @@ python scripts/cli.py rebuild-timers --json
 
 # Regenerate goals/index.md from current DB state (manual)
 python scripts/cli.py sync-md
-# Output: Synced 3 goals to goals/index.md (active=2, paused=1, completed=1)
+# Output: Synced 3 goals to goals/index.md (active=1, paused=1, completed=1)
 #           - +example-goal      (进行中 50%)
-#           -  example-goal-2    (进行中 0%)
 #           - ~paused-goal       (已暂停 33%)
 #           - ~old-completed     (已完成 100%)
 
