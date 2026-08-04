@@ -61,8 +61,8 @@ def list_goals(status: str | None = None) -> list[dict]:
 
 
 def update_goal_status(slug: str, status: str) -> None:
-    """Update a goal's status (active/paused/completed)."""
-    if status not in ("active", "paused", "completed"):
+    """Update a goal's status (active/paused/completed/archived)."""
+    if status not in ("active", "paused", "completed", "archived"):
         raise ValueError(f"Invalid status: {status}")
     with get_conn() as conn:
         conn.execute(
@@ -160,9 +160,9 @@ def update_task_status(id: str, status: str) -> None:
 
     First transition into in_progress stamps started_at via COALESCE.
     The done transition stamps completed_at but does not touch started_at.
-    The pending/skipped transitions do not touch started_at or completed_at.
+    The pending/skipped/archived transitions do not touch started_at or completed_at.
     """
-    if status not in ("pending", "in_progress", "done", "skipped"):
+    if status not in ("pending", "in_progress", "done", "skipped", "archived"):
         raise ValueError(f"Invalid status: {status}")
     ts = now_iso()
     with get_conn() as conn:
@@ -186,6 +186,62 @@ def update_task_status(id: str, status: str) -> None:
                    WHERE id = ?""",
                 (status, ts, id),
             )
+
+
+def archive_goal(slug: str) -> bool:
+    """Soft-delete a goal by setting status='archived'.
+
+    Returns True if the status changed, False if already archived (no-op).
+    Raises ValueError if the goal does not exist.
+    """
+    current = get_goal(slug)
+    if current is None:
+        raise ValueError(f"goal '{slug}' does not exist")
+    if current["status"] == "archived":
+        return False
+    update_goal_status(slug, "archived")
+    return True
+
+
+def archive_task(task_id: str) -> bool:
+    """Soft-delete a task by setting status='archived'.
+
+    Returns True if the status changed, False if already archived (no-op).
+    Raises ValueError if the task does not exist.
+    """
+    current = get_task(task_id)
+    if current is None:
+        raise ValueError(f"task '{task_id}' does not exist")
+    if current["status"] == "archived":
+        return False
+    update_task_status(task_id, "archived")
+    return True
+
+
+def restore_goal(slug: str) -> None:
+    """Restore an archived goal back to 'active'.
+
+    Raises ValueError if the goal does not exist or is not currently archived.
+    """
+    current = get_goal(slug)
+    if current is None:
+        raise ValueError(f"goal '{slug}' does not exist")
+    if current["status"] != "archived":
+        raise ValueError(f"goal '{slug}' is not archived (status='{current['status']}')")
+    update_goal_status(slug, "active")
+
+
+def restore_task(task_id: str) -> None:
+    """Restore an archived task back to 'pending'.
+
+    Raises ValueError if the task does not exist or is not currently archived.
+    """
+    current = get_task(task_id)
+    if current is None:
+        raise ValueError(f"task '{task_id}' does not exist")
+    if current["status"] != "archived":
+        raise ValueError(f"task '{task_id}' is not archived (status='{current['status']}')")
+    update_task_status(task_id, "pending")
 
 
 def mark_task_reminded(id: str) -> None:

@@ -241,3 +241,102 @@ def test_update_task_status_done_to_in_progress_preserves_started_at():
     t = get_task("g-s4-T001")
     assert t["started_at"] == started
     assert t["status"] == "in_progress"
+
+
+class TestArchiveRestore:
+    def _setup(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "todos.db"
+        monkeypatch.setattr(db, "DB_PATH", str(db_path))
+        schema_path = os.path.join(os.path.dirname(__file__), "..", "data", "schema.sql")
+        with sqlite3.connect(str(db_path)) as conn:
+            with open(schema_path) as f:
+                conn.executescript(f.read())
+            conn.execute("ALTER TABLE tasks ADD COLUMN started_at TEXT")
+        return db_path
+
+    def _make_goal(self, slug="g", name="G", status="active"):
+        db.create_goal(slug, name, "")
+        if status != "active":
+            db.update_goal_status(slug, status)
+        return db.get_goal(slug)
+
+    def _make_task(self, task_id="g-T001", slug="g", status="pending"):
+        db.create_task(task_id, slug, 1, "T", "", 1.0, [])
+        if status != "pending":
+            db.update_task_status(task_id, status)
+        return db.get_task(task_id)
+
+    # --- archive_goal ---
+
+    def test_archive_goal_sets_archived(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        self._make_goal()
+        changed = db.archive_goal("g")
+        assert changed is True
+        assert db.get_goal("g")["status"] == "archived"
+
+    def test_archive_goal_idempotent_returns_false(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        self._make_goal(status="active")
+        assert db.archive_goal("g") is True
+        # second call: already archived, no-op
+        assert db.archive_goal("g") is False
+
+    def test_archive_goal_missing_raises(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        with pytest.raises(ValueError):
+            db.archive_goal("does-not-exist")
+
+    # --- restore_goal ---
+
+    def test_restore_goal_archived_to_active(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        self._make_goal(status="archived")
+        db.restore_goal("g")
+        assert db.get_goal("g")["status"] == "active"
+
+    def test_restore_goal_non_archived_raises(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        self._make_goal(status="active")
+        with pytest.raises(ValueError, match="not archived"):
+            db.restore_goal("g")
+
+    def test_restore_goal_missing_raises(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        with pytest.raises(ValueError, match="does not exist"):
+            db.restore_goal("nope")
+
+    # --- archive_task / restore_task ---
+
+    def test_archive_task_sets_archived(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        self._make_goal()
+        self._make_task()
+        assert db.archive_task("g-T001") is True
+        assert db.get_task("g-T001")["status"] == "archived"
+
+    def test_archive_task_idempotent(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        self._make_goal()
+        self._make_task()
+        db.archive_task("g-T001")
+        assert db.archive_task("g-T001") is False
+
+    def test_archive_task_missing_raises(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        with pytest.raises(ValueError):
+            db.archive_task("does-not-exist")
+
+    def test_restore_task_archived_to_pending(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        self._make_goal()
+        self._make_task(status="archived")
+        db.restore_task("g-T001")
+        assert db.get_task("g-T001")["status"] == "pending"
+
+    def test_restore_task_non_archived_raises(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        self._make_goal()
+        self._make_task(status="done")
+        with pytest.raises(ValueError, match="not archived"):
+            db.restore_task("g-T001")
