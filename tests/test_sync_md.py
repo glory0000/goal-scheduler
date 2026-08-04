@@ -686,3 +686,108 @@ class TestAutosyncIntegration:
         if tracked.exists():
             assert tracked.read_text(encoding="utf-8") == before
 
+
+# -------------------- TestArchivedGoalInSync --------------------
+
+class TestArchivedGoalInSync:
+    """Archived goals must be hidden from goals/index.md rendering.
+
+    These tests use the schema.sql + ALTER TABLE pattern (see
+    tests/test_db.py:15-18) because db._init_schema() does not exist.
+    """
+
+    def _seed_db(self, tmp_path, monkeypatch, goals_spec):
+        """Seed an isolated DB. goals_spec is list of dicts with slug/name/status.
+
+        Each goal also creates a stub goals/<slug>/goal.md.
+        """
+        import db
+        schema_path = REPO_ROOT / "data" / "schema.sql"
+        db_path = tmp_path / "todos.db"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.executescript(schema_path.read_text(encoding="utf-8"))
+            conn.execute("ALTER TABLE tasks ADD COLUMN started_at TEXT")
+            for g in goals_spec:
+                status = g.get("status", "active")
+                conn.execute(
+                    "INSERT INTO goals (slug, name, description, status, "
+                    "total_tasks, completed_tasks, created_at, updated_at) "
+                    "VALUES (?, ?, '', ?, 0, 0, '2026-08-04T00:00:00', "
+                    "'2026-08-04T00:00:00')",
+                    (g["slug"], g["name"], status),
+                )
+                (tmp_path / "goals" / g["slug"]).mkdir(
+                    parents=True, exist_ok=True
+                )
+                (tmp_path / "goals" / g["slug"] / "goal.md").write_text(
+                    f"# {g['name']}\n", encoding="utf-8"
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        monkeypatch.setattr(db, "DB_PATH", str(db_path))
+        return db_path
+
+    def test_archived_excluded_from_index(self, tmp_path, monkeypatch):
+        self._seed_db(tmp_path, monkeypatch, [
+            {"slug": "alive", "name": "A", "status": "active"},
+            {"slug": "dead", "name": "D", "status": "archived"},
+        ])
+        result = sync_md.sync_index_md(tmp_path / "goals")
+        index = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
+        assert "[A](alive/goal.md)" in index
+        assert "[D](dead/goal.md)" not in index
+
+    def test_archived_excluded_from_by_status(self, tmp_path, monkeypatch):
+        self._seed_db(tmp_path, monkeypatch, [
+            {"slug": "alive", "name": "A", "status": "active"},
+            {"slug": "dead", "name": "D", "status": "archived"},
+        ])
+        result = sync_md.sync_index_md(tmp_path / "goals")
+        # synced_count includes archived (it IS a known DB row) but by_status
+        # does not bucket archived.
+        assert result.synced_count == 2
+        assert "archived" not in result.by_status
+        assert result.by_status["active"] == 1
+
+    def test_restore_makes_goal_reappear(self, tmp_path, monkeypatch):
+        import db
+        self._seed_db(tmp_path, monkeypatch, [
+            {"slug": "x", "name": "X", "status": "active"},
+        ])
+        # archive
+        db.archive_goal("x")
+        sync_md.sync_index_md(tmp_path / "goals")
+        index = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
+        assert "[X](x/goal.md)" not in index
+        # restore
+        db.restore_goal("x")
+        sync_md.sync_index_md(tmp_path / "goals")
+        index = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
+        assert "[X](x/goal.md)" in index
+
+    def test_archived_with_missing_goal_md_no_warning(self, tmp_path, monkeypatch):
+        """An archived goal whose goal.md is missing must NOT trigger the warning."""
+        import db
+        schema_path = REPO_ROOT / "data" / "schema.sql"
+        db_path = tmp_path / "todos.db"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.executescript(schema_path.read_text(encoding="utf-8"))
+            conn.execute("ALTER TABLE tasks ADD COLUMN started_at TEXT")
+            conn.execute(
+                "INSERT INTO goals (slug, name, description, status, "
+                "total_tasks, completed_tasks, created_at, updated_at) "
+                "VALUES (?, ?, '', ?, 0, 0, '2026-08-04T00:00:00', "
+                "'2026-08-04T00:00:00')",
+                ("archived-ghost", "G", "archived"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        monkeypatch.setattr(db, "DB_PATH", str(db_path))
+        # Note: NO goals/archived-ghost/ directory or goal.md created.
+        result = sync_md.sync_index_md(tmp_path / "goals")
+        assert not any("archived-ghost" in w for w in result.warnings)
+

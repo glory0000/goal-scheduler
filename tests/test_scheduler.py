@@ -135,3 +135,48 @@ def test_compute_schedule_warns_on_slot_overflow():
     assert any("g-w-T001" in m for m in msgs)
     assert any("BigTask" in m for m in msgs)
     assert any("2" in m for m in msgs)
+
+
+# -------------------- TestArchivedExclusion --------------------
+
+class TestArchivedExclusion:
+    """Task 2: archived tasks must be excluded from `list_eligible_tasks`.
+
+    NOTE: The brief states `list_eligible_tasks` lives in scheduler.py, but
+    it actually lives in db.py. The line numbers in the brief (142-156) match
+    db.py's function, so this test calls db.list_eligible_tasks() and the
+    production change happens in db.py.
+    """
+
+    def _setup_db(self, tmp_path, monkeypatch):
+        """Seed an isolated DB. db._init_schema() does not exist; use the
+        schema.sql + ALTER TABLE pattern (see tests/test_db.py:15-18).
+        """
+        db_path = tmp_path / "todos.db"
+        with sqlite3.connect(str(db_path)) as conn:
+            with open(
+                os.path.join(os.path.dirname(__file__), "..", "data", "schema.sql")
+            ) as f:
+                conn.executescript(f.read())
+            conn.execute("ALTER TABLE tasks ADD COLUMN started_at TEXT")
+        monkeypatch.setattr(db, "DB_PATH", str(db_path))
+
+    def test_list_eligible_tasks_excludes_archived(self, tmp_path, monkeypatch):
+        self._setup_db(tmp_path, monkeypatch)
+        db.create_goal("g", "G", "")
+        # Create with default 'pending' status, then transition to in_progress
+        # / done / archived via update_task_status. create_task does NOT
+        # accept a status arg (see Task 1's known setup).
+        db.create_task("g-T001", "g", 1, "pending task", "", 1.0, [])
+        db.create_task("g-T002", "g", 2, "in_progress task", "", 1.0, [])
+        db.create_task("g-T003", "g", 3, "done task", "", 1.0, [])
+        db.create_task("g-T004", "g", 4, "archived task", "", 1.0, [])
+        db.update_task_status("g-T002", "in_progress")
+        db.update_task_status("g-T003", "done")
+        db.update_task_status("g-T004", "archived")
+
+        eligible = db.list_eligible_tasks()
+        eligible_ids = {t["id"] for t in eligible}
+        assert "g-T001" in eligible_ids      # pending: eligible
+        assert "g-T003" not in eligible_ids  # done: not eligible
+        assert "g-T004" not in eligible_ids  # archived: NOT eligible (NEW)

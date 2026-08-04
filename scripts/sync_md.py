@@ -25,6 +25,7 @@ STATUS_LABELS: dict[str, str] = {
     "active": "进行中",
     "paused": "已暂停",
     "completed": "已完成",
+    "archived": "已归档",
 }
 
 _GROUP_ORDER: list[str] = ["active", "paused", "completed"]
@@ -259,9 +260,15 @@ def sync_index_md(goals_root: Path) -> SyncResult:
     #    and DB goals whose goal.md is missing.
     warnings: list[str] = []
     db_slugs = {g["slug"] for g in goals}
-    # I3: DB goal has no goals/<slug>/ directory at all.
+    goal_status_by_slug = {g["slug"]: g["status"] for g in goals}
+    # I3: DB goal has no goals/<slug>/ directory at all. Suppressed for
+    # archived goals (Task 2): an archived goal is allowed to have no
+    # on-disk footprint.
     for slug in sorted(db_slugs):
-        if not (goals_root / slug).is_dir():
+        if (
+            not (goals_root / slug).is_dir()
+            and goal_status_by_slug.get(slug) != "archived"
+        ):
             warnings.append(
                 f"goal '{slug}' has no goals/{slug}/"
             )
@@ -272,7 +279,10 @@ def sync_index_md(goals_root: Path) -> SyncResult:
             warnings.append(
                 f"goal dir 'goals/{entry.name}/' has no DB row — skipped"
             )
-        elif not (entry / "goal.md").exists():
+        elif (
+            not (entry / "goal.md").exists()
+            and goal_status_by_slug.get(entry.name) != "archived"
+        ):
             warnings.append(f"goal '{entry.name}' has no goals/{entry.name}/goal.md")
 
     # 4. Render and diff against the old lines.
@@ -307,7 +317,12 @@ def sync_index_md(goals_root: Path) -> SyncResult:
 
     by_status: dict[str, int] = {s: 0 for s in _GROUP_ORDER}
     for g in goals:
-        by_status[g["status"]] = by_status.get(g["status"], 0) + 1
+        status = g["status"]
+        if status not in by_status:
+            # archived goals are counted by synced_count but not bucketed
+            # into by_status (which tracks active/paused/completed)
+            continue
+        by_status[status] += 1
 
     # M9: warn about goals with unknown statuses (outside the three
     # buckets). `_group_and_sort` silently drops them from the rendered

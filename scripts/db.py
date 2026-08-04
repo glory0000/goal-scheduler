@@ -140,10 +140,18 @@ def list_tasks(goal_slug: str | None = None, status: str | None = None) -> list[
 
 
 def list_eligible_tasks(goal_slug: str | None = None) -> list[dict]:
-    """Pending tasks whose `depends_on` are all done."""
+    """Pending tasks whose `depends_on` are all done.
+
+    Archived tasks are skipped (Task 2 of CRUD补全 plan). The current
+    implementation only queries `status='pending'`, so archived tasks are
+    excluded implicitly; the explicit guard documents intent and protects
+    against future filter changes.
+    """
     candidates = list_tasks(goal_slug=goal_slug, status="pending")
     out = []
     for t in candidates:
+        if t["status"] == "archived":
+            continue
         all_done = True
         for dep_id in t["depends_on"]:
             dep = get_task(dep_id)
