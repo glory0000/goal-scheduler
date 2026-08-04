@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass, field
+from pathlib import Path
 
 # ---- public constants ----
 
@@ -141,3 +143,155 @@ def render_index_md(
     body = "\n".join(parts)
     # Strip trailing whitespace, then add a single trailing newline.
     return body.rstrip() + "\n"
+
+
+# ---- file-I/O result ----
+
+@dataclass
+class SyncResult:
+    """Outcome of one `sync_index_md` call."""
+
+    path: Path
+    synced_count: int
+    by_status: dict[str, int] = field(default_factory=dict)
+    changed: list[str] = field(default_factory=list)
+    unchanged: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    header_preserved: bool = False
+
+
+def _status_key_from_label(label: str) -> str | None:
+    """Reverse STATUS_LABELS map (best-effort, used for change detection)."""
+    for key, value in STATUS_LABELS.items():
+        if value == label:
+            return key
+    return None
+
+
+# Matches a fully-rendered index line, capturing name / slug / status / pct.
+# Half-width colon is tolerated so hand-edited files still diff cleanly.
+_RENDERED_LINE_RE = re.compile(
+    r"^\s*-\s+\[(?P<name>[^\]]*)\]\((?P<slug>[^)]+)/goal\.md\)"
+    r"\s+—\s+状态[：:](?P<status>[^—]+)—\s+完成率\s+(?P<pct>\d+)%"
+)
+
+# Matches just the link part of a line (slug extraction, no status needed).
+_SLUG_LINE_RE = re.compile(r"^-\s+\[[^\]]*\]\((?P<slug>[^)]+)/goal\.md\)")
+
+# The `## <label>` group headings we generate. `_split_header` stops at the
+# first link line, so these headings land inside its "header" slice; they must
+# be trimmed back off or every sync would duplicate them (spec: idempotency).
+_GENERATED_HEADINGS = frozenset(f"## {STATUS_LABELS[s]}" for s in _GROUP_ORDER)
+
+
+def _strip_generated_headings(header_text: str) -> str:
+    """Truncate `header_text` at the first generated group heading.
+
+    Everything from that heading onward is regenerated content, not the user's
+    header. Returns the remainder with trailing newlines stripped.
+    """
+    lines = header_text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() in _GENERATED_HEADINGS:
+            return "\n".join(lines[:i]).rstrip("\n")
+    return header_text
+
+
+# ---- file-I/O entry point ----
+
+def sync_index_md(goals_root: Path) -> SyncResult:
+    """Read DB state, render goals/index.md, write atomically.
+
+    Steps:
+    1. Ensure `goals_root` exists.
+    2. Read the existing index.md header (if any) via `_split_header`.
+    3. Read all goals / tasks from the DB (no status filters).
+    4. Warn about orphan goal dirs (no DB row) and DB goals whose goal.md
+       is missing on disk. Orphans are skipped; missing goal.md still gets
+       a rendered link.
+    5. Render via `render_index_md`, diff per-slug lines against the old
+       file to fill `changed` / `unchanged`.
+    6. Write `index.md.tmp` then `Path.replace()` onto `index.md`.
+
+    Raises OSError if the atomic write fails (caller decides the exit code).
+    """
+    # Lazy import so the pure-function layer stays importable without db.
+    import db  # noqa: PLC0415
+
+    goals_root = Path(goals_root)
+    goals_root.mkdir(parents=True, exist_ok=True)
+    index_path = goals_root / "index.md"
+
+    # 1. Read the existing file once: header + old per-slug lines.
+    header_text = ""
+    header_preserved = False
+    old_lines: dict[str, str] = {}
+    if index_path.exists():
+        old_text = index_path.read_text(encoding="utf-8")
+        header_text, _ = _split_header(old_text)
+        header_text = _strip_generated_headings(header_text)
+        # Only genuine user content counts as a preserved header; a file that
+        # held nothing but our own generated sections has no header to keep.
+        header_preserved = bool(header_text)
+        for line in old_text.splitlines():
+            match = _RENDERED_LINE_RE.match(line)
+            if not match:
+                continue
+            # Normalize via the current label map so a half-width colon or
+            # stale label spelling isn't reported as a change.
+            status_key = _status_key_from_label(match.group("status").strip())
+            if status_key:
+                slug = match.group("slug")
+                old_lines[slug] = (
+                    f"- [{match.group('name')}]({slug}/goal.md) — 状态："
+                    f"{STATUS_LABELS[status_key]} — 完成率 {match.group('pct')}%"
+                )
+
+    # 2. Read DB.
+    goals = db.list_goals()  # no status filter
+    tasks = db.list_tasks()  # all goals
+    tasks_by_goal = group_tasks_by_goal(tasks)
+
+    # 3. Detect orphan dirs (no DB row) and DB goals missing goal.md.
+    warnings: list[str] = []
+    db_slugs = {g["slug"] for g in goals}
+    for entry in sorted(goals_root.iterdir()):
+        if not entry.is_dir():
+            continue
+        if entry.name not in db_slugs:
+            warnings.append(
+                f"goal dir 'goals/{entry.name}/' has no DB row — skipped"
+            )
+        elif not (entry / "goal.md").exists():
+            warnings.append(f"goal '{entry.name}' has no goals/{entry.name}/goal.md")
+
+    # 4. Render and diff against the old lines.
+    rendered = render_index_md(goals, tasks_by_goal, header_text)
+    new_lines: dict[str, str] = {}
+    for line in rendered.splitlines():
+        match = _SLUG_LINE_RE.match(line)
+        if match:
+            new_lines[match.group("slug")] = line
+
+    all_slugs = set(old_lines) | set(new_lines)
+    changed = sorted(s for s in all_slugs if old_lines.get(s) != new_lines.get(s))
+    unchanged = sorted(all_slugs - set(changed))
+
+    # 5. Atomic write.
+    tmp_path = index_path.with_suffix(index_path.suffix + ".tmp")
+    tmp_path.write_text(rendered, encoding="utf-8")
+    tmp_path.replace(index_path)
+
+    by_status: dict[str, int] = {s: 0 for s in _GROUP_ORDER}
+    for g in goals:
+        by_status[g["status"]] = by_status.get(g["status"], 0) + 1
+
+    return SyncResult(
+        path=index_path,
+        synced_count=len(goals),
+        by_status=by_status,
+        changed=changed,
+        unchanged=unchanged,
+        warnings=warnings,
+        header_preserved=header_preserved,
+    )
