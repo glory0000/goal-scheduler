@@ -12,7 +12,7 @@ def format_goal_row(goal: dict) -> str:
     total = goal.get("total_tasks") or 0
     completed = goal.get("completed_tasks") or 0
     pct = int(round(completed * 100 / total)) if total > 0 else 0
-    return f"{goal['slug']:<20}  {completed}/{total}  完成  {pct}%"
+    return f"{goal['slug']:<20}  {completed}/{total} 完成  {pct}%"
 
 
 def format_task_row(assignment: dict) -> str:
