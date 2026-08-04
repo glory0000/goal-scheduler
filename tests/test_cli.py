@@ -1367,3 +1367,276 @@ class TestGoalRestoreCli:
         _init_db(db_path)
         result = run_cli(["goal", "restore", "nope"], db_path=db_path, cwd=tmp_path)
         assert result.returncode == 2
+
+
+# ----- TestTaskListCli -----
+
+class TestTaskListCli:
+    def _seed(self, tmp_path):
+        db_path = tmp_path / "todos.db"
+        _init_db(db_path)
+        with sqlite3.connect(str(db_path)) as conn:
+            for g in [{"slug": "g1", "name": "G1"}, {"slug": "g2", "name": "G2"}]:
+                conn.execute(
+                    "INSERT INTO goals (slug, name, description, status, "
+                    "total_tasks, completed_tasks, created_at, updated_at) "
+                    "VALUES (?, ?, '', 'active', 0, 0, '2026-08-05T00:00:00', "
+                    "'2026-08-05T00:00:00')",
+                    (g["slug"], g["name"]),
+                )
+                (tmp_path / "goals" / g["slug"]).mkdir(parents=True, exist_ok=True)
+                (tmp_path / "goals" / g["slug"] / "goal.md").write_text(
+                    f"# {g['name']}\n", encoding="utf-8"
+                )
+            tasks = [
+                ("g1-T001", "g1", 1, "pending", "pending task"),
+                ("g1-T002", "g1", 2, "done", "done task"),
+                ("g2-T001", "g2", 1, "pending", "another pending"),
+                ("g1-T003", "g1", 3, "archived", "archived task"),
+            ]
+            for tid, slug, seq, status, title in tasks:
+                conn.execute(
+                    "INSERT INTO tasks (id, goal_slug, sequence, title, "
+                    "description, estimated_hours, depends_on, status, "
+                    "last_reminded_at, completed_at, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, '', 1.0, '[]', ?, NULL, NULL, "
+                    "'2026-08-05T00:00:00', '2026-08-05T00:00:00')",
+                    (tid, slug, seq, title, status),
+                )
+            conn.commit()
+        return db_path
+
+    def test_default_hides_archived(self, tmp_path):
+        db_path = self._seed(tmp_path)
+        result = run_cli(["task", "list"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert "g1-T001" in result.stdout
+        assert "g1-T002" in result.stdout
+        assert "g1-T003" not in result.stdout  # archived excluded
+
+    def test_all_includes_archived(self, tmp_path):
+        db_path = self._seed(tmp_path)
+        result = run_cli(["task", "list", "--all"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0
+        assert "g1-T003" in result.stdout
+
+    def test_goal_filter(self, tmp_path):
+        db_path = self._seed(tmp_path)
+        result = run_cli(["task", "list", "--goal", "g1"],
+                         db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0
+        assert "g1-T001" in result.stdout
+        assert "g2-T001" not in result.stdout
+
+    def test_status_query(self, tmp_path):
+        db_path = self._seed(tmp_path)
+        result = run_cli(["task", "list", "--status", "done"],
+                         db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0
+        assert "g1-T002" in result.stdout
+        assert "g1-T001" not in result.stdout
+
+    def test_status_archived_is_selectable(self, tmp_path):
+        db_path = self._seed(tmp_path)
+        result = run_cli(["task", "list", "--status", "archived"],
+                         db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0
+        assert "g1-T003" in result.stdout
+        assert "g1-T001" not in result.stdout
+
+    def test_json_output(self, tmp_path):
+        db_path = self._seed(tmp_path)
+        result = run_cli(["task", "list", "--json"],
+                         db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert isinstance(data, list)
+        # --json honours the same archived-hiding default as text output
+        assert {t["id"] for t in data} == {"g1-T001", "g1-T002", "g2-T001"}
+
+    def test_empty_list_reports_no_tasks(self, tmp_path):
+        db_path = tmp_path / "todos.db"
+        _init_db(db_path)
+        result = run_cli(["task", "list"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0
+        assert "(no tasks)" in result.stdout
+
+
+# ----- TestTaskShowCli -----
+
+class TestTaskShowCli:
+    def _seed_one(self, tmp_path):
+        db_path = tmp_path / "todos.db"
+        _init_db(db_path)
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                "INSERT INTO goals (slug, name, description, status, "
+                "total_tasks, completed_tasks, created_at, updated_at) "
+                "VALUES ('g', 'G', '', 'active', 0, 0, '2026-08-05T00:00:00', "
+                "'2026-08-05T00:00:00')"
+            )
+            conn.execute(
+                "INSERT INTO tasks (id, goal_slug, sequence, title, "
+                "description, estimated_hours, depends_on, status, "
+                "last_reminded_at, completed_at, created_at, updated_at) "
+                "VALUES ('g-T001', 'g', 1, 'hello task', '', 1.0, '[]', "
+                "'pending', NULL, NULL, '2026-08-05T00:00:00', '2026-08-05T00:00:00')"
+            )
+            conn.commit()
+        (tmp_path / "goals" / "g").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "goals" / "g" / "goal.md").write_text("# G\n", encoding="utf-8")
+        return db_path
+
+    def test_show_existing(self, tmp_path):
+        db_path = self._seed_one(tmp_path)
+        result = run_cli(["task", "show", "g-T001"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert "g-T001" in result.stdout
+        assert "hello task" in result.stdout
+        # raw status key and its label are both shown (mirrors `goal show`)
+        assert "pending" in result.stdout
+        assert "待办" in result.stdout
+
+    def test_show_json(self, tmp_path):
+        db_path = self._seed_one(tmp_path)
+        result = run_cli(["task", "show", "g-T001", "--json"],
+                         db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["id"] == "g-T001"
+        assert data["status"] == "pending"
+
+    def test_show_missing_exits_2(self, tmp_path):
+        db_path = tmp_path / "todos.db"
+        _init_db(db_path)
+        result = run_cli(["task", "show", "nope"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 2
+
+
+# ----- TestTaskDeleteCli -----
+
+class TestTaskDeleteCli:
+    def _seed_one(self, tmp_path):
+        db_path = tmp_path / "todos.db"
+        _init_db(db_path)
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                "INSERT INTO goals (slug, name, description, status, "
+                "total_tasks, completed_tasks, created_at, updated_at) "
+                "VALUES ('g', 'G', '', 'active', 0, 0, '2026-08-05T00:00:00', "
+                "'2026-08-05T00:00:00')"
+            )
+            for tid, status in [("g-T001", "pending"), ("g-T002", "done")]:
+                conn.execute(
+                    "INSERT INTO tasks (id, goal_slug, sequence, title, "
+                    "description, estimated_hours, depends_on, status, "
+                    "last_reminded_at, completed_at, created_at, updated_at) "
+                    "VALUES (?, 'g', ?, '', '', 1.0, '[]', ?, NULL, NULL, "
+                    "'2026-08-05T00:00:00', '2026-08-05T00:00:00')",
+                    (tid, 1 if tid.endswith("001") else 2, status),
+                )
+            conn.commit()
+        (tmp_path / "goals" / "g").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "goals" / "g" / "goal.md").write_text("# G\n", encoding="utf-8")
+        return db_path
+
+    def test_delete_archives_and_updates_pct(self, tmp_path):
+        db_path = self._seed_one(tmp_path)
+        result = run_cli(["task", "delete", "g-T001"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        # Archived tasks still count toward the index.md denominator, so the
+        # goal reads 1 done / 2 total = 50%.
+        index = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
+        assert "完成率 50%" in index
+
+    def test_delete_sets_status_archived(self, tmp_path):
+        db_path = self._seed_one(tmp_path)
+        result = run_cli(["task", "delete", "g-T001"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        with sqlite3.connect(str(db_path)) as conn:
+            row = conn.execute(
+                "SELECT status FROM tasks WHERE id = 'g-T001'"
+            ).fetchone()
+        assert row[0] == "archived"
+
+    def test_delete_idempotent(self, tmp_path):
+        db_path = self._seed_one(tmp_path)
+        r1 = run_cli(["task", "delete", "g-T001"], db_path=db_path, cwd=tmp_path)
+        assert r1.returncode == 0
+        (tmp_path / "goals" / "index.md").write_text(
+            "# SENTINEL\n", encoding="utf-8"
+        )
+        r2 = run_cli(["task", "delete", "g-T001"], db_path=db_path, cwd=tmp_path)
+        assert r2.returncode == 0
+        index = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
+        assert "SENTINEL" in index
+
+    def test_delete_missing_exits_2(self, tmp_path):
+        db_path = tmp_path / "todos.db"
+        _init_db(db_path)
+        result = run_cli(["task", "delete", "nope"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 2
+
+
+# ----- TestTaskRestoreCli -----
+
+class TestTaskRestoreCli:
+    def test_restore_archived_to_pending(self, tmp_path):
+        db_path = tmp_path / "todos.db"
+        _init_db(db_path)
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                "INSERT INTO goals (slug, name, description, status, "
+                "total_tasks, completed_tasks, created_at, updated_at) "
+                "VALUES ('g', 'G', '', 'active', 0, 0, '2026-08-05T00:00:00', "
+                "'2026-08-05T00:00:00')"
+            )
+            conn.execute(
+                "INSERT INTO tasks (id, goal_slug, sequence, title, "
+                "description, estimated_hours, depends_on, status, "
+                "last_reminded_at, completed_at, created_at, updated_at) "
+                "VALUES ('g-T001', 'g', 1, '', '', 1.0, '[]', 'archived', "
+                "NULL, NULL, '2026-08-05T00:00:00', '2026-08-05T00:00:00')"
+            )
+            conn.commit()
+        (tmp_path / "goals" / "g").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "goals" / "g" / "goal.md").write_text("# G\n", encoding="utf-8")
+        result = run_cli(["task", "restore", "g-T001"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        with sqlite3.connect(str(db_path)) as conn:
+            row = conn.execute(
+                "SELECT status FROM tasks WHERE id = 'g-T001'"
+            ).fetchone()
+        assert row[0] == "pending"
+        index = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
+        # 0 of 1 done = 0% — but the goal is back in the active group
+        assert "[G](g/goal.md)" in index
+        assert "完成率 0%" in index
+
+    def test_restore_non_archived_exits_2(self, tmp_path):
+        db_path = tmp_path / "todos.db"
+        _init_db(db_path)
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                "INSERT INTO goals (slug, name, description, status, "
+                "total_tasks, completed_tasks, created_at, updated_at) "
+                "VALUES ('g', 'G', '', 'active', 0, 0, '2026-08-05T00:00:00', "
+                "'2026-08-05T00:00:00')"
+            )
+            conn.execute(
+                "INSERT INTO tasks (id, goal_slug, sequence, title, "
+                "description, estimated_hours, depends_on, status, "
+                "last_reminded_at, completed_at, created_at, updated_at) "
+                "VALUES ('g-T001', 'g', 1, '', '', 1.0, '[]', 'pending', "
+                "NULL, NULL, '2026-08-05T00:00:00', '2026-08-05T00:00:00')"
+            )
+            conn.commit()
+        result = run_cli(["task", "restore", "g-T001"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 2
+        assert "not archived" in result.stderr
+
+    def test_restore_missing_exits_2(self, tmp_path):
+        db_path = tmp_path / "todos.db"
+        _init_db(db_path)
+        result = run_cli(["task", "restore", "nope"], db_path=db_path, cwd=tmp_path)
+        assert result.returncode == 2

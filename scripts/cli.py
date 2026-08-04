@@ -33,6 +33,19 @@ from sync_md import sync_index_md, compute_completion_pct, STATUS_LABELS  # noqa
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 VALID_STATUSES = ("pending", "in_progress", "done", "skipped")
 
+# Display labels for task statuses. Distinct from sync_md.STATUS_LABELS,
+# which covers *goal* statuses (active/paused/completed/archived).
+# 'archived' is listed here so `task list`/`task show` can render soft-deleted
+# rows, but it stays out of VALID_STATUSES: `task delete` is the only way in,
+# just as `goal delete` is for goals.
+TASK_STATUS_LABELS: dict[str, str] = {
+    "pending": "待办",
+    "in_progress": "进行中",
+    "done": "已完成",
+    "skipped": "已跳过",
+    "archived": "已归档",
+}
+
 DB_UNINIT_HINT = (
     "Error: database not initialized. "
     "Run `python scripts/db.py init` first."
@@ -426,6 +439,80 @@ def subcommand_task_update(args, as_json: bool) -> int:
     return 0
 
 
+def subcommand_task_list(args, as_json: bool) -> int:
+    """List tasks. Default excludes archived; --all includes them;
+    --status filters to exactly one status. --goal narrows to one goal."""
+    if args.all:
+        tasks = db.list_tasks(goal_slug=args.goal)
+    elif args.status:
+        tasks = db.list_tasks(goal_slug=args.goal, status=args.status)
+    else:
+        tasks = [
+            t for t in db.list_tasks(goal_slug=args.goal)
+            if t["status"] != "archived"
+        ]
+    if as_json:
+        print(to_json(tasks))
+        return 0
+    if not tasks:
+        print("(no tasks)")
+        return 0
+    for t in tasks:
+        label = TASK_STATUS_LABELS.get(t["status"], t["status"])
+        print(f"- {t['id']:<20} [{t['goal_slug']}] {label}  {t['title']}")
+    return 0
+
+
+def subcommand_task_show(args, as_json: bool) -> int:
+    """Show one task by id. Exits 2 if not found."""
+    task = db.get_task(args.task_id)
+    if task is None:
+        _emit_error(f"Task '{args.task_id}' not found.", code=2)
+    if as_json:
+        print(to_json(task))
+        return 0
+    label = TASK_STATUS_LABELS.get(task["status"], task["status"])
+    print(f"id：         {task['id']}")
+    print(f"goal：       {task['goal_slug']}")
+    print(f"sequence：   {task['sequence']}")
+    print(f"title：      {task['title']}")
+    print(f"hours：      {task.get('estimated_hours')}")
+    print(f"status：     {task['status']} ({label})")
+    return 0
+
+
+def subcommand_task_delete(args, as_json: bool) -> int:
+    """Soft-delete: set status='archived'. Idempotent — re-deleting an
+    already-archived task exits 0 without re-rendering index.md."""
+    try:
+        changed = db.archive_task(args.task_id)
+    except ValueError as exc:
+        _emit_error(f"Error: {exc}", code=2)
+    if changed:
+        _autosync_index_md()
+    if as_json:
+        print(to_json({"task_id": args.task_id, "archived": changed}))
+    else:
+        verb = "archived" if changed else "already archived"
+        print(f"Task '{args.task_id}' {verb}.")
+    return 0
+
+
+def subcommand_task_restore(args, as_json: bool) -> int:
+    """Restore an archived task to 'pending'. Strict: exits 2 if the task is
+    missing or is not currently archived."""
+    try:
+        db.restore_task(args.task_id)
+    except ValueError as exc:
+        _emit_error(f"Error: {exc}", code=2)
+    _autosync_index_md()
+    if as_json:
+        print(to_json({"task_id": args.task_id, "status": "pending"}))
+    else:
+        print(f"Task '{args.task_id}' restored to pending.")
+    return 0
+
+
 def subcommand_focus(args, as_json: bool) -> int:
     if args.focus_command == "set":
         _validate_slug(args.slug)
@@ -541,6 +628,26 @@ def _build_parser() -> argparse.ArgumentParser:
     tu.add_argument("task_id")
     tu.add_argument("status")
 
+    tl = task_sub.add_parser("list", help="List tasks (default: hide archived)",
+                             parents=[json_parent])
+    tl.add_argument("--goal", help="Only tasks belonging to this goal slug")
+    tl.add_argument("--status", choices=list(TASK_STATUS_LABELS))
+    tl.add_argument("--all", action="store_true", help="Include archived tasks")
+
+    tsh = task_sub.add_parser("show", help="Show a single task",
+                              parents=[json_parent])
+    tsh.add_argument("task_id")
+
+    td = task_sub.add_parser("delete",
+                             help="Soft-delete a task (sets status=archived)",
+                             parents=[json_parent])
+    td.add_argument("task_id")
+
+    tr = task_sub.add_parser("restore",
+                             help="Restore an archived task to pending",
+                             parents=[json_parent])
+    tr.add_argument("task_id")
+
     sub.add_parser("rebuild-timers",
                    help="Reconcile today's planned timers with cc-connect")
 
@@ -591,8 +698,16 @@ def run(args: list[str]) -> int:
             return subcommand_goal_restore(parsed, as_json)
         if parsed.command == "task" and parsed.task_command == "add":
             return subcommand_task_add(parsed, as_json)
+        if parsed.command == "task" and parsed.task_command == "list":
+            return subcommand_task_list(parsed, as_json)
+        if parsed.command == "task" and parsed.task_command == "show":
+            return subcommand_task_show(parsed, as_json)
         if parsed.command == "task" and parsed.task_command == "update":
             return subcommand_task_update(parsed, as_json)
+        if parsed.command == "task" and parsed.task_command == "delete":
+            return subcommand_task_delete(parsed, as_json)
+        if parsed.command == "task" and parsed.task_command == "restore":
+            return subcommand_task_restore(parsed, as_json)
         if parsed.command == "rebuild-timers":
             return subcommand_rebuild_timers(parsed, as_json)
         if parsed.command == "sync-md":
