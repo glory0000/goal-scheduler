@@ -2,6 +2,19 @@
 {% block title %}目标 - 任务看板{% endblock %}
 {% block content %}
   <h1>目标</h1>
+  <div class="filter-links">
+    {% if status_filter == 'archived' %}
+      <span>显示：已归档</span>
+      <a href="/">显示进行中</a>
+    {% elif show_all %}
+      <span>显示：全部</span>
+      <a href="/">只显示进行中</a>
+      <a href="/?status=archived">查看已归档</a>
+    {% else %}
+      <a href="/?all=1">显示全部</a>
+      <a href="/?status=archived">查看已归档</a>
+    {% endif %}
+  </div>
   {% if rows %}
     <div class="table-wrap">
       <table>

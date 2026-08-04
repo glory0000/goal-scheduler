@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Task {{ task.id if task else "任务不存在" }} - 任务看板{% endblock %}
+{% block content %}
+  {% if not task %}
+    <section class="empty-state"><h1>任务不存在</h1><p><a href="{{ url_for('index') }}">返回目标列表</a></p></section>
+  {% else %}
+    <h1>{{ task.id }}</h1>
+    {% if is_archived %}
+    <div class="banner banner-archived">
+      此任务已归档。可在 CLI 用 <code>task restore {{ task.id }}</code> 恢复。
+    </div>
+    {% endif %}
+    <dl>
+      <dt>id</dt><dd>{{ task.id }}</dd>
+      <dt>goal</dt><dd><a href="/goal/{{ task.goal_slug }}">{{ task.goal_slug }}</a></dd>
+      <dt>sequence</dt><dd>{{ task.sequence }}</dd>
+      <dt>title</dt><dd>{{ task.title }}</dd>
+      <dt>hours</dt><dd>{{ task.estimated_hours }}</dd>
+      <dt>status</dt><dd>{{ task.status }}</dd>
+    </dl>
+  {% endif %}
+{% endblock %}

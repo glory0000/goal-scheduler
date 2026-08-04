@@ -259,3 +259,137 @@ def test_today_timeline_appends_elapsed_suffix_for_in_progress(client, monkeypat
     assert "进行中任务（已用" in response.text
     # The closing parenthesis immediately follows the elapsed value
     assert "）" in response.text
+
+
+# ============================================================================
+# Task 5: archived filter on /, archived banner on goal_detail, /task/<id> route
+# ============================================================================
+
+
+def _seed_archived_goals(tmp_path, monkeypatch):
+    """Seed an isolated DB with one active and one archived goal.
+
+    Returns the db_path string.
+    """
+    db_path = tmp_path / "todos.db"
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        conn.execute("ALTER TABLE tasks ADD COLUMN started_at TEXT")
+    monkeypatch.setattr(db, "DB_PATH", str(db_path))
+    db.create_goal("alive", "Alive", "")
+    db.create_goal("dead", "Dead", "")
+    db.update_goal_status("dead", "archived")
+    return str(db_path)
+
+
+def _app_client(monkeypatch, tmp_path):
+    flask_app = create_app()
+    flask_app.config["TESTING"] = True
+    return flask_app.test_client()
+
+
+def test_index_default_hides_archived(tmp_path, monkeypatch):
+    """GET / with no params hides archived goals."""
+    _seed_archived_goals(tmp_path, monkeypatch)
+    client = _app_client(monkeypatch, tmp_path)
+
+    rv = client.get("/")
+
+    assert rv.status_code == 200
+    body = rv.get_data(as_text=True)
+    assert "Alive" in body
+    assert "Dead" not in body
+
+
+def test_index_show_all_includes_archived(tmp_path, monkeypatch):
+    """GET /?all=1 shows all goals (including archived)."""
+    _seed_archived_goals(tmp_path, monkeypatch)
+    client = _app_client(monkeypatch, tmp_path)
+
+    rv = client.get("/?all=1")
+
+    assert rv.status_code == 200
+    body = rv.get_data(as_text=True)
+    assert "Alive" in body
+    assert "Dead" in body
+
+
+def test_index_status_query(tmp_path, monkeypatch):
+    """GET /?status=archived shows only archived goals."""
+    _seed_archived_goals(tmp_path, monkeypatch)
+    client = _app_client(monkeypatch, tmp_path)
+
+    rv = client.get("/?status=archived")
+
+    assert rv.status_code == 200
+    body = rv.get_data(as_text=True)
+    assert "Dead" in body
+    assert "Alive" not in body
+
+
+def test_goal_detail_archived_banner(tmp_path, monkeypatch):
+    """Archived goal shows a banner with restoration hint on /goal/<slug>."""
+    _seed_archived_goals(tmp_path, monkeypatch)
+    client = _app_client(monkeypatch, tmp_path)
+
+    rv = client.get("/goal/dead")
+
+    assert rv.status_code == 200
+    body = rv.get_data(as_text=True)
+    # Banner text mentions archived + restoration hint
+    assert ("已归档" in body) or ("archived" in body.lower())
+    assert ("restore" in body.lower()) or ("goal restore" in body)
+
+
+def _seed_task_for_detail(tmp_path, monkeypatch):
+    """Seed an isolated DB with one goal and one archived task."""
+    db_path = tmp_path / "todos.db"
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        conn.execute("ALTER TABLE tasks ADD COLUMN started_at TEXT")
+    monkeypatch.setattr(db, "DB_PATH", str(db_path))
+    db.create_goal("g", "G", "")
+    db.create_task("g-T001", "g", 1, "hello task", "", 2.0, [])
+    db.update_task_status("g-T001", "archived")
+    return str(db_path)
+
+
+def test_task_detail_basic(tmp_path, monkeypatch):
+    """GET /task/<id> renders the task id, title, and parent goal slug."""
+    _seed_task_for_detail(tmp_path, monkeypatch)
+    client = _app_client(monkeypatch, tmp_path)
+
+    rv = client.get("/task/g-T001")
+
+    assert rv.status_code == 200
+    body = rv.get_data(as_text=True)
+    assert "g-T001" in body
+    assert "hello task" in body
+    # Parent goal link contains the slug "g"
+    assert "g" in body
+
+
+def test_task_detail_archived_banner(tmp_path, monkeypatch):
+    """Archived task shows a banner on /task/<id>."""
+    _seed_task_for_detail(tmp_path, monkeypatch)
+    client = _app_client(monkeypatch, tmp_path)
+
+    rv = client.get("/task/g-T001")
+
+    assert rv.status_code == 200
+    body = rv.get_data(as_text=True)
+    assert ("已归档" in body) or ("archived" in body.lower())
+
+
+def test_task_detail_404(tmp_path, monkeypatch):
+    """GET /task/<unknown-id> returns 404."""
+    db_path = tmp_path / "todos.db"
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        conn.execute("ALTER TABLE tasks ADD COLUMN started_at TEXT")
+    monkeypatch.setattr(db, "DB_PATH", str(db_path))
+
+    client = _app_client(monkeypatch, tmp_path)
+    rv = client.get("/task/does-not-exist")
+
+    assert rv.status_code == 404

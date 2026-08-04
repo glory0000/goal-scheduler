@@ -4,6 +4,11 @@
   {% if not goal %}
     <section class="empty-state"><h1>目标不存在</h1><p><a href="{{ url_for('index') }}">返回目标列表</a></p></section>
   {% else %}
+    {% if is_archived %}
+    <div class="banner banner-archived">
+      此目标已归档。可在 CLI 用 <code>goal restore {{ goal.slug }}</code> 恢复。
+    </div>
+    {% endif %}
     <header class="page-header">
       <div>
         <h1>{{ goal.name }}</h1>

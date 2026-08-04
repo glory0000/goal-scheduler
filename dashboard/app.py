@@ -7,7 +7,7 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from flask import Flask, Response, render_template
+from flask import Flask, Response, render_template, request
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -184,8 +184,21 @@ def create_app() -> Flask:
 
     @flask_app.get("/")
     def index():
-        rows = [_goal_row(goal) for goal in db.list_goals()]
-        return render_template("index.html", rows=rows)
+        show_all = request.args.get("all") == "1"
+        status_filter = request.args.get("status")
+        if status_filter:
+            goals = db.list_goals(status=status_filter)
+        elif show_all:
+            goals = db.list_goals()
+        else:
+            goals = db.list_goals(status="active")
+        rows = [_goal_row(goal) for goal in goals]
+        return render_template(
+            "index.html",
+            rows=rows,
+            show_all=show_all,
+            status_filter=status_filter,
+        )
 
     @flask_app.get("/goal/<slug>")
     def goal_detail(slug: str):
@@ -206,6 +219,20 @@ def create_app() -> Flask:
             goal=goal,
             summary=summary,
             task_rows=[_task_row(task) for task in tasks],
+            is_archived=(goal["status"] == "archived"),
+        )
+
+    @flask_app.get("/task/<task_id>")
+    def task_detail(task_id: str):
+        task = db.get_task(task_id)
+        if task is None:
+            return render_template("task_detail.html", task=None), 404
+        parent = db.get_goal(task["goal_slug"])
+        return render_template(
+            "task_detail.html",
+            task=task,
+            parent=parent,
+            is_archived=(task["status"] == "archived"),
         )
 
     @flask_app.get("/health")
