@@ -1563,13 +1563,20 @@ class TestTaskDeleteCli:
         db_path = self._seed_one(tmp_path)
         r1 = run_cli(["task", "delete", "g-T001"], db_path=db_path, cwd=tmp_path)
         assert r1.returncode == 0
-        (tmp_path / "goals" / "index.md").write_text(
-            "# SENTINEL\n", encoding="utf-8"
-        )
+        index_path = tmp_path / "goals" / "index.md"
+        # A no-op delete must not rewrite index.md at all. Asserting on the
+        # file's content is not enough: sync_index_md preserves whatever
+        # header it finds, so a sentinel would survive a re-render and the
+        # assertion would pass even if the sync fired. Compare mtime+size,
+        # which only stay put if no write happened.
+        before = index_path.stat()
         r2 = run_cli(["task", "delete", "g-T001"], db_path=db_path, cwd=tmp_path)
         assert r2.returncode == 0
-        index = (tmp_path / "goals" / "index.md").read_text(encoding="utf-8")
-        assert "SENTINEL" in index
+        assert "already archived" in r2.stdout
+        after = index_path.stat()
+        assert (after.st_mtime_ns, after.st_size) == (
+            before.st_mtime_ns, before.st_size
+        ), "no-op `task delete` must not re-render index.md"
 
     def test_delete_missing_exits_2(self, tmp_path):
         db_path = tmp_path / "todos.db"
