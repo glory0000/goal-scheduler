@@ -131,6 +131,45 @@ todos/
     └── plans/                 ← 实施计划
 ```
 
+## Installation
+
+### 依赖
+
+- **Python 3.10+** — 代码用了 PEP 604 union (`X | None`) 和 `match`/`case`，3.10 以下跑不动。
+- **Git** — DB / `goals/*.md` / `goals/index.md` 每次写都 `git commit`，克隆即可。
+- **Flask** — 看板唯一 Python 第三方依赖（见 `dashboard/requirements.txt`）。
+- **cc-connect** — 外部 CLI 工具（**不在 PyPI**，独立安装）。负责把飞书消息转给 Claude、托管所有 timer / cron。本项目假定它已装好且 `cc-connect --version` 能跑通。
+
+### 步骤
+
+```bash
+# 1. 克隆
+git clone https://github.com/glory0000/goal-scheduler.git
+cd goal-scheduler
+
+# 2. 装 Python 依赖（清华源；境外可去掉 -i）
+python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r dashboard/requirements.txt
+
+# 3.（可选）装测试依赖
+python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements-dev.txt
+
+# 4. 装 cc-connect，按其官方文档把 app_id / app_secret 配好、连上飞书
+#    验证：cc-connect --version   应能打印版本号
+#    验证：cc-connect cron list   应能列出已有 cron（首次为空）
+
+# 5. 跑测试看一切正常
+python -m pytest -q
+```
+
+### 跟飞书机器人的绑定（哪条链路卡在哪）
+
+- **不在本项目**。`scripts/cc_timers.py` 只包装 `cc-connect timer list/add/del` 三个子命令，**不持有 app_id、不路由 chat_id、不区分多个 bot**。
+- **配置在 cc-connect 那一层**。Feishu app 的 app_id / app_secret / 事件订阅 URL 全部由 cc-connect 自己管（不在本仓库里）。本项目是 cc-connect 的**下游**——它看到的是 cc-connect 转过来的消息文本和它返回给 cc-connect 的回复文本。
+- **一对一假设**。项目按"一个 cc-connect 实例 = 一个飞书 bot = 一个用户"设计：所有状态集中在一个 `data/todos.db`、一份 `config/schedule.json`、一个 `settings.today_focus`。
+- **想绑多个 bot**？可以在同一台机器跑多个 cc-connect 进程（每个绑一个 bot），但**所有 cc-connect 仍然读写同一个本地 DB**——同一个提醒会从多个 bot 重复发出去，没有用户路由。要真正支持多用户，必须先给项目加 `user_id` 概念（`goals` / `tasks` / `settings` / `schedule` 全部加命名空间），那是另一个 spec，不在本仓库当前作用域。
+
+完成安装后，下一步走 Quick start。
+
 ## Quick start
 
 ```bash
