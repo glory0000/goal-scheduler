@@ -334,6 +334,29 @@ python -m pytest -q          # 213 tests, 全部通过
 
 覆盖每一层：db CRUD、scheduler 选任务、reminder 消息、CLI 所有子命令 + `--json`、sync_md 渲染、cc_timers reconcile、migrate 迁移、dashboard 路由。
 
+## Roadmap
+
+下面两项不在 v0.1 scope，但已经画在前方的方向。任何一块开做前都要先写 spec / plan，再动代码。
+
+### 多用户
+
+让一个 cc-connect / 飞书 bot 服务多个用户，每个用户独立的目标、任务、焦点、时段。
+
+- **DB**：`goals` / `tasks` 加 `user_id` 列；`settings` 改为 `(user_id, key)` 复合主键，`today_focus` 不再全局唯一
+- **配置**：`config/schedule.json` 按用户拆分或迁入 DB
+- **文件**：`goals/<slug>/goal.md` → `goals/<user_id>/<slug>/goal.md`
+- **CLI**：`scripts/cc_timers.py` 在 timer prompt 头注入 `user_id`；`scripts/cli.py` 加 `--user` 全局参数；`rebuild-timers` 按用户迭代
+- **cc-connect**：通过飞书消息发起人解析 `user_id`（需 `app_id + open_id → user_id` 映射）
+
+### 移动 App
+
+移动场景当前由飞书 / Telegram 文本客户端承载（每个空闲时段一条提醒就是移动端告知）。如果非要独立 App：
+
+- **PWA 优先**：把 Flask 看板包成 PWA，加 Service Worker 离线缓存 + Web Push。开发成本约 1 周。
+- **原生 App**：独立项目、独立 spec，至少 4-6 周。
+
+无短期需求；真要做先 PWA。
+
 ## License
 
 MIT
