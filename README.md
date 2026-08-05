@@ -1,44 +1,145 @@
-# Todo Scheduler
+# Goal Scheduler
 
-Claude-driven personal todo scheduler.
+> 一个把目标拆解成任务、塞进空闲时段、再由 AI 助理按时提醒你做的个人日程系统。
 
-## What it does
+一个 Claude 驱动的个人目标调度器。把"我想做 X"拆成可执行的任务，按你当天的空闲时段排好，通过 Feishu 在每个时段准时提醒你。日常对话就能改目标、改任务、改焦点；后端自动同步状态。
 
-- Tracks your free time slots (weekday + weekend).
-- Manages multiple goals with task decomposition.
-- Sends Feishu reminders at each free time slot.
-- Re-schedules dynamically after task completion, focus changes, or goal updates.
-- Survives session crashes via a daily rebuild cron.
+## Features
+
+- **目标拆解** — 一个目标拆成 N 个有序任务，任务之间可声明依赖（依赖未完成就不排）。
+- **空闲时段感知** — 按 `config/schedule.json` 区分工作日 / 周末，每天给你真实可用的时间段。
+- **动态调度** — 任务完成、焦点切换、目标暂停都会重新排。截至当天剩余时段，不浪费。
+- **焦点优先** — 一天只做一个目标（`focus set`），调度器只盯那个目标的任务。
+- **状态枚举** — Goal: `active / paused / completed / archived`；Task: `pending / in_progress / done / skipped / archived`（archived = 软删除，可恢复）。
+- **自动同步** — 任何 CRUD 改完，goals/index.md 自动重渲染；不需要手动跑 sync。
+- **WEB 控制台** — Flask 仪表盘 (`dashboard/`) 实时看目标、任务、今日时段、统计数据。
+- **崩溃自愈** — 每天 00:05 一次性 cron 重建当天剩下的提醒链；任何一个 timer 漏了，第二天自动补。
+- **schema 迁移** — `migrations/NNN_*.sql` 前向 only，runner 自带事务回滚。
+- **统一 CLI** — `python scripts/cli.py {status,today,goal,task,focus,rebuild-timers,sync-md}`，所有命令都支持 `--json`。
+
+## Architecture
+
+数据流一句话：**用户/Feishu → cc-connect → Claude(脑) → CLI(手) → SQLite+文件系统(记忆)**。
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  cc-connect 桥接层                              │
+│  · cron 0 5 * * *  每天重建倒计时链                            │
+│  · timer 下一个空闲时段自动 fire                                │
+│  · 把 Feishu/Lark/Telegram 消息转给 Claude                       │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                       Claude (调度大脑)                         │
+│  · 听用户说 "新目标 X" → brainstorm 拆任务 → 调 CLI 写入 DB    │
+│  · 听 timer 唤醒 → 调 reminder.py 拼消息 → 回复给 cc-connect    │
+│  · 听用户说 "完成了" → 调 CLI 改状态 → 触发 autosync            │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│             scripts/cli.py  统一入口 (argparse)                 │
+│     status  today  goal {add,list,show,update,delete,restore}   │
+│     task  {add,list,show,update,delete,restore}                 │
+│     focus {set,clear}  rebuild-timers  sync-md                  │
+│  · --json 输出单行 JSON                                         │
+│  · 错误 → stderr, 退出码 0/1/2/3                              │
+│  · 改完自动 _autosync_index_md()                                │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────┬───────────────┬────────────────┐
+        ▼             ▼               ▼                ▼
+   ┌─────────┐  ┌──────────┐   ┌──────────┐   ┌───────────┐
+   │ db.py   │  │scheduler │   │ sync_md  │   │cc_timers  │
+   │ SQLite  │  │  .py     │   │  .py     │   │  .py      │
+   │ CRUD    │  │ 选任务   │   │ MD 渲染  │   │ cc-connect│
+   │         │  │ 塞时段   │   │          │   │ API 包装  │
+   └─────────┘  └──────────┘   └──────────┘   └───────────┘
+        │             │              │               │
+        ▼             ▼              ▼               ▼
+   ┌─────────┐  ┌──────────┐   ┌──────────┐   ┌───────────┐
+   │todos.db │  │schedule  │   │goals/    │   │cc-connect │
+   │SQLite   │  │  .json   │   │  index.md│   │  timers   │
+   │goals,   │  │空闲时段  │   │+ 每个目标│   │(由 cc-mgmnt│
+   │tasks,   │  │定义      │   │  goal.md │   │  维护)    │
+   │settings │  │          │   │          │   │           │
+   └─────────┘  └──────────┘   └──────────┘   └───────────┘
+```
+
+**核心模块职责（一个文件 = 一个职责）:**
+
+| 文件 | 职责 |
+|---|---|
+| `scripts/db.py` | SQLite CRUD：`goals` / `tasks` / `settings` 表 + `archive_*` / `restore_*` 软删除 |
+| `scripts/migrate.py` | 向前 only 迁移 runner：`init` 初始化 + `schema_version`，`upgrade` 按序号 apply |
+| `scripts/scheduler.py` | 纯函数：给定 (focus, date, time)，算出 (task, slot) 配对 |
+| `scripts/reminder.py` | 纯函数：把 (goal, task, slot) 渲染成 Feishu 消息文本（中文模板） |
+| `scripts/format_utils.py` | 工具：elapsed time 格式化、Chinese number words 等 |
+| `scripts/cli_output.py` | CLI 专用的人/机两种输出格式 |
+| `scripts/sync_md.py` | 渲染 `goals/index.md`；纯函数 + 文件 I/O 分两层 |
+| `scripts/cc_timers.py` | 包装 cc-connect CLI；生产用 subprocess，测试用文件 backend |
+| `scripts/cli.py` | argparse 总入口；mod dispatch；--json；autosync 钩子 |
+| `dashboard/app.py` | Flask 只读控制台 (5 个路由) |
+
+## Project structure
+
+```
+todos/
+├── README.md                  ← 本文件
+├── config/
+│   └── schedule.json          ← 你的空闲时段定义（工作日 / 周末）
+├── data/
+│   ├── todos.db               ← SQLite：goals / tasks / settings
+│   └── schema.sql             ← 初始 schema（被 db.py init 用）
+├── migrations/
+│   └── 002_add_started_at.sql ← 后续 schema 变更按 NNN_xxx.sql 顺序 apply
+├── goals/                     ← 每个目标 = 一个子目录 + goal.md
+│   ├── index.md               ← 自动渲染的索引（按状态分组 + 完成率）
+│   └── example-goal/
+│       └── goal.md
+├── scripts/
+│   ├── db.py                  ← SQLite CRUD（被 cli.py / scheduler.py 调）
+│   ├── scheduler.py           ← 选任务、塞时段（纯函数）
+│   ├── reminder.py            ← 拼消息（纯函数）
+│   ├── cli.py                 ← 统一 CLI 入口
+│   ├── sync_md.py             ← 渲染 goals/index.md
+│   ├── cc_timers.py           ← cc-connect timer API 包装
+│   ├── migrate.py             ← DB migration runner
+│   ├── cli_output.py          ← CLI 输出格式
+│   └── format_utils.py        ← 字符串/时间工具
+├── dashboard/                 ← Flask 只读 WEB 控制台
+│   ├── app.py
+│   ├── templates/
+│   ├── static/
+│   └── README.md
+├── tests/                     ← 213 个 pytest，覆盖所有层
+└── docs/superpowers/          ← 历史设计/spec/plan
+    ├── specs/                 ← 设计文档
+    └── plans/                 ← 实施计划
+```
 
 ## Quick start
 
-1. Run setup (see `docs/superpowers/specs/...` Initialization section).
-2. Add your first goal via Feishu: tell Claude what you want to do.
-3. Claude will brainstorm the task breakdown, write it to `goals/<slug>/goal.md` and SQLite.
-4. Set your focus: "今日重点 = a-stock-quant".
-5. Claude creates the first timer. Each reminder fires the next one.
-
-## Key files
-
-- `goals/<slug>/goal.md` — goal description + progress stats.
-- `data/todos.db` — SQLite: goals, tasks, settings.
-- `config/schedule.json` — your free time slots.
-- `scripts/db.py`, `scheduler.py`, `reminder.py` — Python helpers.
-- `logs/cc-connect.log` — cc-connect command history.
-
-## Migrations
-
-Schema changes land as numbered SQL files in `migrations/`:
-
 ```bash
-python scripts/migrate.py init      # one-time: stamp schema_version=1
-python scripts/migrate.py upgrade   # apply any pending migrations/
+# 1. 初始化 DB（一个命令就够了，不需要 migrate.py init）
+python scripts/db.py init
+
+# 2. 启动 dashboard（可选）
+cd dashboard && python app.py    # 浏览器打开 http://localhost:5000
+
+# 3. 通过 Feishu 告诉 Claude 你想做什么
+# 例: "新目标：学西班牙语，3 个月达到 B1"
+# Claude 会 brainstorm → 调 CLI 写 DB → sync index.md
+
+# 4. 设定今日焦点
+python scripts/cli.py focus set learn-spanish
+
+# 5. 重建今天的提醒链 (cron 也会自动跑)
+python scripts/cli.py rebuild-timers
 ```
 
-Add a new migration by creating `migrations/NNN_description.sql` where `NNN`
-is the next three-digit version (e.g. `002_add_started_at.sql`). The runner
-applies each file in order; a failed file is rolled back and leaves
-`schema_version` at the prior value.
+完整日常命令见下方 CLI 部分。
 
 ## Common commands
 
@@ -53,12 +154,9 @@ bash scripts/simulate_reminder.sh "2026-08-04 21:00"
 bash scripts/break_session.sh
 ```
 
-### CLI
+## CLI
 
-The unified Python CLI is a thin wrapper over `scripts/db.py` and
-`scripts/scheduler.py`. It is what Claude and the user call to read or
-change state. Output is human-readable by default; add `--json` for a
-single parseable JSON object on stdout. All errors go to stderr.
+`scripts/cli.py` 是 Claude 和用户读写状态的统一入口。人读默认走可读文本；加 `--json` 输出单行 JSON。所有错误 → stderr。
 
 ```bash
 # View state
@@ -66,15 +164,15 @@ python scripts/cli.py status
 python scripts/cli.py today
 
 # Add a goal / task
-python scripts/cli.py goal add a-stock-quant "A股量化" --description "策略回测与实盘"
-python scripts/cli.py task add a-stock-quant-T013 a-stock-quant 13 "跑通回测示例" --hours 1.0
+python scripts/cli.py goal add learn-spanish "学西班牙语" --description "B1 三个月"
+python scripts/cli.py task add learn-spanish-T013 learn-spanish 13 "背诵 100 词" --hours 1.0
 
 # Update progress
-python scripts/cli.py task update a-stock-quant-T013 in_progress
-python scripts/cli.py task update a-stock-quant-T013 done
+python scripts/cli.py task update learn-spanish-T013 in_progress
+python scripts/cli.py task update learn-spanish-T013 done
 
 # Change today's focus
-python scripts/cli.py focus set a-stock-quant
+python scripts/cli.py focus set learn-spanish
 python scripts/cli.py focus clear
 
 # Rebuild today's reminder timers
@@ -131,37 +229,60 @@ python scripts/cli.py task restore example-goal-T001
 Exit codes: `0` success, `1` input error, `2` database not initialized,
 `3` resource not found.
 
+## Migrations
+
+Schema 变更向前 only，按 `migrations/NNN_xxx.sql` 顺序 apply：
+
+```bash
+python scripts/migrate.py init      # 已由 db.py init 完成，不必再跑
+python scripts/migrate.py upgrade   # apply 任何挂起的 migrations/
+```
+
+加新 migration：创建 `migrations/NNN_description.sql`，NNN 是下一个三位版本号。Runner 按文件名字典序 apply；任一文件失败则回滚，`schema_version` 停在之前值。
+
 ## Fallback cron
 
-The system relies on a single cc-connect cron to rebuild broken timer chains. Verify with:
+依赖唯一一个 cc-connect cron 在每天 00:05 重建 timer 链。验证：
 
 ```bash
 cc-connect cron list
 ```
 
-Expected: 1 job at `5 0 * * *` (00:05 daily). If missing, recreate:
+期望看到 1 个 job `5 0 * * *` (`00:05` 每天)。如果丢了，重建：
 
 ```bash
-cc-connect cron add --cron "5 0 * * *" --prompt "Daily fallback for todos scheduler. Read data/todos.db and config/schedule.json. For each remaining free slot today, ensure a cc-connect timer exists pointing at a pending task. Cancel stale timers (pointing at done/skipped tasks or past slots). Commit any DB or file changes. If everything is in order, no commit needed." --desc "Todo scheduler: daily reminder chain rebuild"
+cc-connect cron add --cron "5 0 * * *" --prompt "Daily fallback for goal-scheduler. Read data/todos.db and config/schedule.json. For each remaining free slot today, ensure a cc-connect timer exists pointing at a pending task. Cancel stale timers (pointing at done/skipped tasks or past slots). Commit any DB or file changes. If everything is in order, no commit needed." --desc "Goal scheduler: daily reminder chain rebuild"
 ```
 
-## Shadow period (1-2 weeks)
+## Shadow period (1-2 周)
 
-Before fully trusting the scheduler, run it in parallel with your manual planning:
+正式信任调度器前，并行跑 1-2 周人肉计划，每天对比：
 
-1. Each morning, dump state via `bash scripts/dump_state.sh`.
-2. Compare Claude's planned schedule with your manual plan.
-3. Note discrepancies (Claude missed X, over-allocated Y, etc.).
-4. Tweak `config/schedule.json` or scheduling rules in `scheduler.py` as needed.
-5. Once 7+ days match consistently, remove the example goal and go live.
+1. 早上跑 `bash scripts/dump_state.sh` dump 当前状态。
+2. 对比 Claude 排的计划 vs 你的手排计划。
+3. 记偏差（Claude 漏了 X / 多排了 Y）。
+4. 调 `config/schedule.json` 或 `scheduler.py` 规则。
+5. 连续 7+ 天匹配后，删 example-goal 上线。
 
 ## When to engage Claude
 
-Tell Claude any of these via Feishu:
+任何下面这些都可以直接告诉 Claude（中文 / Feishu）：
 
-- "新目标：<描述>" — start a new goal (Claude will brainstorm).
-- "Txxx 完成了" / "Txxx 进度 50%" — update task status.
-- "今日重点 = <slug>" — change focus.
-- "跳过 <时段>" / "暂停 <slug>" — skip or pause.
-- "<目标> 增加任务：<描述>" — add a task.
-- "删除 Txxx" / "改 Txxx 为先做 Tyyy" — modify tasks.
+- "新目标：<描述>" — 开新目标（Claude brainstorm）。
+- "Txxx 完成了" / "Txxx 进度 50%" — 改任务状态。
+- "今日重点 = <slug>" — 改焦点。
+- "跳过 <时段>" / "暂停 <slug>" — 跳时段 / 暂停目标。
+- "<目标> 增加任务：<描述>" — 加任务。
+- "删除 Txxx" / "改 Txxx 为先做 Tyyy" — 改任务。
+
+## Tests
+
+```bash
+python -m pytest -q          # 213 tests, 全部通过
+```
+
+覆盖每一层：db CRUD、scheduler 选任务、reminder 消息、CLI 所有子命令 + `--json`、sync_md 渲染、cc_timers reconcile、migrate 迁移、dashboard 路由。
+
+## License
+
+MIT
