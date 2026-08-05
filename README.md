@@ -4,6 +4,31 @@
 
 一个 Claude 驱动的个人目标调度器。把"我想做 X"拆成可执行的任务，按你当天的空闲时段排好，通过 Feishu 在每个时段准时提醒你。日常对话就能改目标、改任务、改焦点；后端自动同步状态。
 
+## What it does
+
+**🌅 早晨 00:05** — 一个 cron 自动重建今天的提醒链。它读 DB 算出"今天剩下的空闲时段 + 焦点对应的 pending tasks"，diff 出缺失的 timer 补上，删掉过期的。**你不做任何事。**
+
+**💬 你跟 Claude 说话**
+
+> 你：今日重点 = learn-spanish
+> Claude：`cli.py focus set learn-spanish`，已生效。
+
+**⏰ 18:00 时段到点** — cc-connect 唤醒 Claude，Claude 跑 `reminder.py` 拼一条这样的消息发到 Feishu：
+
+```
+⏰ 18:00 时段开始（18:00-19:00）
+
+📌 目标：学西班牙语
+📋 任务：T001 — 入门发音规则（共 1 小时）
+📎 依赖：无
+
+✅ 完成 T001 后回我，我会自动排下一时段。
+```
+
+**✅ 你回了"完成"** — Claude 调 `cli.py task update T001 done`，DB 改完顺手 sync `goals/index.md`，下一时段自动排 T002。
+
+**🛟 任何一步断了** — 第二天 00:05 cron 重建时 diff 出来补上，你的状态不会丢。
+
 ## Features
 
 - **目标拆解** — 一个目标拆成 N 个有序任务，任务之间可声明依赖（依赖未完成就不排）。
