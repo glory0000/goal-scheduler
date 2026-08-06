@@ -96,3 +96,38 @@ def test_format_reminder_no_elapsed_suffix_for_pending():
         task=task,
     )
     assert "（已用" not in msg
+
+
+def test_format_reminder_with_description():
+    """A task with description renders a 📝 步骤: block with numbered lines."""
+    goal = {"name": "G"}
+    task = {
+        "id": "x-T001",
+        "title": "Do thing",
+        "description": "1. First\n2. Second\n3. Third",
+        "estimated_hours": 1.0,
+        "depends_on": [],
+        "status": "pending",
+    }
+    out = reminder.format_reminder("2026-08-06", "12:00", "13:00", goal, task)
+    assert "📝 步骤：" in out
+    # numbered lines present, in order
+    idx_1 = out.index("1. First")
+    idx_2 = out.index("2. Second")
+    idx_3 = out.index("3. Third")
+    assert idx_1 < idx_2 < idx_3
+
+
+def test_format_reminder_without_description():
+    """A task with empty description renders with NO 📝 步骤: block (backward compat)."""
+    goal = {"name": "G"}
+    task = {
+        "id": "x-T001",
+        "title": "Do thing",
+        "description": "",
+        "estimated_hours": 1.0,
+        "depends_on": [],
+        "status": "pending",
+    }
+    out = reminder.format_reminder("2026-08-06", "12:00", "13:00", goal, task)
+    assert "📝 步骤：" not in out

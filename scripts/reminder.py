@@ -34,11 +34,27 @@ def format_reminder(
         except ValueError:
             elapsed_suffix = ""
 
+    # Build description block
+    description_block = ""
+    raw_desc = (task.get("description") or "").strip()
+    if raw_desc:
+        # Split on newlines, strip each, drop empties
+        lines = [ln.strip() for ln in raw_desc.splitlines() if ln.strip()]
+        if lines:
+            # Render first 7 lines with numbering
+            rendered = "\n".join(f"  {i+1}. {ln}" for i, ln in enumerate(lines[:7]))
+            # Add extra lines notice if needed
+            if len(lines) > 7:
+                extra = len(lines) - 7
+                rendered += f"\n  ... (+{extra} more — 回复 \"{task_short_id} 展开\" 查看完整版)"
+            description_block = f"📝 步骤：\n{rendered}\n\n"
+
     return (
         f"⏰ {slot_start} 时段开始（{slot_start}-{slot_end}）\n"
         f"\n"
         f"📌 目标：{goal['name']}\n"
         f"🎯 任务：{task_short_id} - {task['title']}{elapsed_suffix}\n"
+        f"{description_block}"
         f"⏱️ 预计耗时：{hours_str}\n"
         f"{deps_block}\n"
         f"\n"
