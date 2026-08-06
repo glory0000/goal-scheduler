@@ -47,7 +47,7 @@ def format_reminder(
             if len(lines) > 7:
                 extra = len(lines) - 7
                 rendered += f"\n  ... (+{extra} more — 回复 \"{task_short_id} 展开\" 查看完整版)"
-            description_block = f"📝 步骤：\n{rendered}\n\n"
+            description_block = f"📝 步骤：\n{rendered}\n"
 
     return (
         f"⏰ {slot_start} 时段开始（{slot_start}-{slot_end}）\n"
