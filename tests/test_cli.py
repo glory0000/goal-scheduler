@@ -513,6 +513,130 @@ def test_task_add_with_description(tmp_path):
     assert task[0] == "1. A\n2. B\n3. C"
 
 
+def test_task_update_with_description(tmp_path):
+    """Updating a task with --description persists the new description."""
+    db_path = tmp_path / "todos.db"
+    _init_db(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO goals (slug, name, description, status, "
+            "total_tasks, completed_tasks, created_at, updated_at) "
+            "VALUES ('test-upd-desc-goal', '测试目标', '', 'active', "
+            "0, 0, '2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO tasks (id, goal_slug, sequence, title, description, "
+            "estimated_hours, depends_on, status, created_at, updated_at) "
+            "VALUES ('test-upd-desc-T001', 'test-upd-desc-goal', 1, 'Title', "
+            "'old description', 0.0, '[]', 'pending', "
+            "'2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.commit()
+
+    # act: update status AND description
+    result = run_cli(
+        ["task", "update", "test-upd-desc-T001", "in_progress",
+         "--description", "1. new step A\n2. new step B"],
+        db_path=db_path,
+    )
+    assert result.returncode == 0, result.stderr
+    with sqlite3.connect(str(db_path)) as conn:
+        task = conn.execute(
+            "SELECT status, description FROM tasks WHERE id='test-upd-desc-T001'"
+        ).fetchone()
+    assert task is not None
+    assert task[0] == "in_progress"
+    assert task[1] == "1. new step A\n2. new step B"
+
+    # act: update ONLY description (status stays the same)
+    result2 = run_cli(
+        ["task", "update", "test-upd-desc-T001", "in_progress",
+         "--description", "1. even newer\n2. steps"],
+        db_path=db_path,
+    )
+    assert result2.returncode == 0, result2.stderr
+    with sqlite3.connect(str(db_path)) as conn:
+        task2 = conn.execute(
+            "SELECT status, description FROM tasks WHERE id='test-upd-desc-T001'"
+        ).fetchone()
+    assert task2 is not None
+    assert task2[0] == "in_progress"
+    assert task2[1] == "1. even newer\n2. steps"
+
+
+def test_task_add_description_too_long(tmp_path):
+    """Adding a task with description > 2000 chars fails with a clear error."""
+    db_path = tmp_path / "todos.db"
+    _init_db(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO goals (slug, name, description, status, "
+            "total_tasks, completed_tasks, created_at, updated_at) "
+            "VALUES ('test-cap-goal', '测试目标', '', 'active', "
+            "0, 0, '2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.commit()
+
+    # 2001 'x's
+    long_desc = "x" * 2001
+    result = run_cli(
+        ["task", "add", "test-cap-goal-T001", "test-cap-goal", "1", "Title",
+         "--description", long_desc],
+        db_path=db_path,
+    )
+    assert result.returncode != 0
+    assert "description too long" in result.stderr
+
+    # Exactly 2000 should work
+    ok_desc = "x" * 2000
+    result2 = run_cli(
+        ["task", "add", "test-cap-goal-T002", "test-cap-goal", "2", "Title2",
+         "--description", ok_desc],
+        db_path=db_path,
+    )
+    assert result2.returncode == 0, result2.stderr
+
+
+def test_task_update_description_too_long(tmp_path):
+    """Updating a task with description > 2000 chars fails with a clear error."""
+    db_path = tmp_path / "todos.db"
+    _init_db(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO goals (slug, name, description, status, "
+            "total_tasks, completed_tasks, created_at, updated_at) "
+            "VALUES ('test-upd-cap-goal', '测试目标', '', 'active', "
+            "0, 0, '2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO tasks (id, goal_slug, sequence, title, description, "
+            "estimated_hours, depends_on, status, created_at, updated_at) "
+            "VALUES ('test-upd-cap-T001', 'test-upd-cap-goal', 1, 'Title', "
+            "'short desc', 0.0, '[]', 'pending', "
+            "'2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.commit()
+
+    # 2001 'x's
+    long_desc = "x" * 2001
+    result = run_cli(
+        ["task", "update", "test-upd-cap-T001", "pending",
+         "--description", long_desc],
+        db_path=db_path,
+    )
+    assert result.returncode != 0
+    assert "description too long" in result.stderr
+
+    # Exactly 2000 should work
+    ok_desc = "x" * 2000
+    result2 = run_cli(
+        ["task", "update", "test-upd-cap-T001", "pending",
+         "--description", ok_desc],
+        db_path=db_path,
+    )
+    assert result2.returncode == 0, result2.stderr
+
+
 def test_task_add_missing_required_arg(tmp_path):
     """No --hours → defaults to 0.0 (not an error)."""
     db_path = tmp_path / "todos.db"

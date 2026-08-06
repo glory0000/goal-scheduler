@@ -196,6 +196,16 @@ def update_task_status(id: str, status: str) -> None:
             )
 
 
+def update_task_description(task_id: str, description: str) -> None:
+    """Update a task's description field. No-op if task doesn't exist."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET description = ?, updated_at = ? WHERE id = ?",
+            (description, now_iso(), task_id),
+        )
+        conn.commit()
+
+
 def archive_goal(slug: str) -> bool:
     """Soft-delete a goal by setting status='archived'.
 

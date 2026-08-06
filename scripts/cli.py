@@ -379,6 +379,9 @@ def subcommand_task_add(args, as_json: bool) -> int:
                 f"'{args.goal_slug}'.",
                 code=1,
             )
+    if len(args.description) > 2000:
+        _emit_error("description too long (max 2000 chars)", code=1)
+        return 1
     db.create_task(
         args.task_id, args.goal_slug, args.sequence, args.title, args.description,
         args.hours, args.depends_on,
@@ -410,12 +413,21 @@ def subcommand_task_update(args, as_json: bool) -> int:
     task = db.get_task(args.task_id)
     if task is None:
         _emit_error(f"Task '{args.task_id}' not found.", code=3)
-    if task["status"] == args.status:
+
+    if args.description is not None and len(args.description) > 2000:
+        _emit_error("description too long (max 2000 chars)", code=1)
+        return 1
+
+    status_changed = task["status"] != args.status
+    description_changed = args.description is not None and task["description"] != args.description
+
+    if not status_changed and not description_changed:
         # Idempotent: no DB change, exit 0.
         if as_json:
             print(to_json({
                 "id": task["id"],
                 "status": task["status"],
+                "description": task["description"],
                 "started_at": task.get("started_at"),
                 "completed_at": task.get("completed_at"),
                 "updated_at": task.get("updated_at"),
@@ -423,23 +435,35 @@ def subcommand_task_update(args, as_json: bool) -> int:
         else:
             print(f"Task {task['id']} already {args.status} (no change).")
         return 0
-    db.update_task_status(args.task_id, args.status)
+
+    if status_changed:
+        db.update_task_status(args.task_id, args.status)
+
+    if args.description is not None:
+        db.update_task_description(args.task_id, args.description)
+
     updated = db.get_task(args.task_id)
     if as_json:
         print(to_json({
             "id": updated["id"],
             "status": updated["status"],
+            "description": updated["description"],
             "started_at": updated.get("started_at"),
             "completed_at": updated.get("completed_at"),
             "updated_at": updated.get("updated_at"),
         }))
     else:
-        suffix = ""
-        if args.status == "in_progress" and updated.get("started_at"):
-            suffix = f" at {updated['started_at']}"
-        elif args.status == "done" and updated.get("completed_at"):
-            suffix = f" at {updated['completed_at']}"
-        print(f"Task {updated['id']} marked {args.status}{suffix}.")
+        parts = []
+        if status_changed:
+            suffix = ""
+            if args.status == "in_progress" and updated.get("started_at"):
+                suffix = f" at {updated['started_at']}"
+            elif args.status == "done" and updated.get("completed_at"):
+                suffix = f" at {updated['completed_at']}"
+            parts.append(f"marked {args.status}{suffix}")
+        if description_changed:
+            parts.append("description updated")
+        print(f"Task {updated['id']} {', '.join(parts)}.")
     _autosync_index_md()
     return 0
 
@@ -635,6 +659,8 @@ def _build_parser() -> argparse.ArgumentParser:
     tu = task_sub.add_parser("update", help="Update a task's status")
     tu.add_argument("task_id")
     tu.add_argument("status")
+    tu.add_argument("--description", default=None,
+                    help="Update the task's howto description; only writes if provided")
 
     tl = task_sub.add_parser("list", help="List tasks (default: hide archived)",
                              parents=[json_parent])
