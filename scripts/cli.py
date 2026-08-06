@@ -380,7 +380,7 @@ def subcommand_task_add(args, as_json: bool) -> int:
                 code=1,
             )
     db.create_task(
-        args.task_id, args.goal_slug, args.sequence, args.title, "",
+        args.task_id, args.goal_slug, args.sequence, args.title, args.description,
         args.hours, args.depends_on,
     )
     created = db.get_task(args.task_id)
@@ -630,6 +630,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ta.add_argument("--hours", type=float, default=0.0)
     ta.add_argument("--depends-on", action="append", default=[],
                     dest="depends_on")
+    ta.add_argument("--description", default="",
+                    help="Static howto (5-7 numbered steps); rendered in reminders")
     tu = task_sub.add_parser("update", help="Update a task's status")
     tu.add_argument("task_id")
     tu.add_argument("status")

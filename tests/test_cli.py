@@ -486,6 +486,33 @@ def test_task_add_with_dependencies(tmp_path):
     assert json.loads(row[0]) == ["a-stock-quant-T012"]
 
 
+def test_task_add_with_description(tmp_path):
+    """Adding a task with --description persists the description to the DB."""
+    db_path = tmp_path / "todos.db"
+    _init_db(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO goals (slug, name, description, status, "
+            "total_tasks, completed_tasks, created_at, updated_at) "
+            "VALUES ('test-add-desc-goal', '测试目标', '', 'active', "
+            "0, 0, '2026-08-04T00:00:00', '2026-08-04T00:00:00')"
+        )
+        conn.commit()
+
+    result = run_cli(
+        ["task", "add", "test-add-desc-goal-T001", "test-add-desc-goal", "1",
+         "Title", "--description", "1. A\n2. B\n3. C"],
+        db_path=db_path,
+    )
+    assert result.returncode == 0, result.stderr
+    with sqlite3.connect(str(db_path)) as conn:
+        task = conn.execute(
+            "SELECT description FROM tasks WHERE id='test-add-desc-goal-T001'"
+        ).fetchone()
+    assert task is not None
+    assert task[0] == "1. A\n2. B\n3. C"
+
+
 def test_task_add_missing_required_arg(tmp_path):
     """No --hours → defaults to 0.0 (not an error)."""
     db_path = tmp_path / "todos.db"
